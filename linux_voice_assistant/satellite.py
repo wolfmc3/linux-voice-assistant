@@ -1,10 +1,11 @@
 """Voice satellite protocol."""
 
 import asyncio
-import re
 import hashlib
 import logging
 import posixpath
+import re
+import subprocess
 import shutil
 import time
 from collections.abc import Iterable
@@ -19,6 +20,8 @@ from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]
     ListEntitiesDoneResponse,
     ListEntitiesRequest,
     MediaPlayerCommandRequest,
+    NumberCommandRequest,
+    SwitchStateResponse,
     SubscribeHomeAssistantStatesRequest,
     SwitchCommandRequest,
     VoiceAssistantAnnounceFinished,
@@ -45,7 +48,12 @@ from pymicro_wakeword import MicroWakeWord
 from pyopen_wakeword import OpenWakeWord
 
 from .api_server import APIServer
-from .entity import MediaPlayerEntity, MuteSwitchEntity, ThinkingSoundEntity
+from .entity import (
+    MediaPlayerEntity,
+    MuteSwitchEntity,
+    SystemVolumeNumberEntity,
+    ThinkingSoundEntity,
+)
 from .models import AvailableWakeWord, ServerState, WakeWordType
 from .util import call_all
 
@@ -59,8 +67,16 @@ class VoiceSatelliteProtocol(APIServer):
         super().__init__(state.name)
         
         self.state = state
-        self.state.satellite = self
         self.state.connected = False
+        self._is_streaming_audio = False
+        self._tts_url: Optional[str] = None
+        self._tts_played = False
+        self._continue_conversation = False
+        self._timer_finished = False
+        self._processing = False
+        self._pipeline_active = False
+        self._external_wake_words: Dict[str, VoiceAssistantExternalWakeWord] = {}
+        self._disconnect_event = asyncio.Event()
 
         existing_media_players = [
             entity
@@ -129,6 +145,36 @@ class VoiceSatelliteProtocol(APIServer):
             for extra in existing_thinking_sound_switches[1:]:
                 self.state.entities.remove(extra)
 
+        existing_system_volume_numbers = [
+            entity
+            for entity in self.state.entities
+            if isinstance(entity, SystemVolumeNumberEntity)
+        ]
+        if existing_system_volume_numbers:
+            self.state.system_volume_entity = existing_system_volume_numbers[0]
+            for extra in existing_system_volume_numbers[1:]:
+                self.state.entities.remove(extra)
+
+        system_volume = self.state.system_volume_entity
+        if system_volume is None:
+            system_volume = SystemVolumeNumberEntity(
+                server=self,
+                key=len(state.entities),
+                name="Speaker Volume",
+                object_id="speaker_volume",
+                get_volume=self._get_system_volume,
+                set_volume=self._set_system_volume,
+            )
+            self.state.entities.append(system_volume)
+            self.state.system_volume_entity = system_volume
+        elif system_volume not in self.state.entities:
+            self.state.entities.append(system_volume)
+
+        system_volume.server = self
+        system_volume.update_get_volume(self._get_system_volume)
+        system_volume.update_set_volume(self._set_system_volume)
+        system_volume.sync_with_state()
+
         # Add/update thinking sound entity
         thinking_sound_switch = self.state.thinking_sound_entity
         if thinking_sound_switch is None:
@@ -156,15 +202,10 @@ class VoiceSatelliteProtocol(APIServer):
         thinking_sound_switch.update_set_thinking_sound_enabled(self._set_thinking_sound_enabled)
         thinking_sound_switch.sync_with_state()
 
-        self._is_streaming_audio = False
-        self._tts_url: Optional[str] = None
-        self._tts_played = False
-        self._continue_conversation = False
-        self._timer_finished = False
-        self._processing = False
-        self._pipeline_active = False
-        self._external_wake_words: Dict[str, VoiceAssistantExternalWakeWord] = {}
-        self._disconnect_event = asyncio.Event()
+        self.state.satellite = self
+
+        if self.state.ipc_bridge is not None:
+            self.state.ipc_bridge.set_control_handler(self._handle_local_command)
     
     def _set_thinking_sound_enabled(self, new_state: bool) -> None:
         self.state.thinking_sound_enabled = bool(new_state)
@@ -179,6 +220,7 @@ class VoiceSatelliteProtocol(APIServer):
 
     def _set_muted(self, new_state: bool) -> None:
         self.state.muted = bool(new_state)
+        self._emit_ipc_event("muted", value=self.state.muted)
 
         if self.state.muted:
             # voice_assistant.stop behavior
@@ -194,17 +236,120 @@ class VoiceSatelliteProtocol(APIServer):
             self.state.tts_player.play(self.state.unmute_sound)
             # Resume normal operation - wake word detection will be active again
             pass
+
+    def _emit_ipc_event(self, event: str, **data: object) -> None:
+        if self.state.ipc_bridge is None:
+            return
+        self.state.ipc_bridge.emit_event(event, **data)
+
+    def _get_system_volume(self) -> float:
+        cmd = ["amixer"]
+        if self.state.system_volume_device:
+            cmd.extend(["-D", self.state.system_volume_device])
+        cmd.extend(["sget", self.state.system_volume_control])
+
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            _LOGGER.warning(
+                "Unable to read system volume (%s): %s",
+                self.state.system_volume_control,
+                result.stderr.strip() or result.stdout.strip(),
+            )
+            return 0.0
+
+        if match := re.search(r"\[(\d{1,3})%\]", result.stdout):
+            return float(max(0, min(100, int(match.group(1)))))
+
+        _LOGGER.warning(
+            "Unable to parse system volume from amixer output for control '%s'",
+            self.state.system_volume_control,
+        )
+        return 0.0
+
+    def _set_system_volume(self, value: float) -> bool:
+        target = max(0, min(100, int(round(value))))
+        cmd = ["amixer"]
+        if self.state.system_volume_device:
+            cmd.extend(["-D", self.state.system_volume_device])
+        cmd.extend(["sset", self.state.system_volume_control, f"{target}%"])
+
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if result.returncode == 0:
+            return True
+
+        _LOGGER.warning(
+            "Unable to set system volume to %s%% (%s): %s",
+            target,
+            self.state.system_volume_control,
+            result.stderr.strip() or result.stdout.strip(),
+        )
+        return False
+
+    def _adjust_volume(self, step: int) -> None:
+        if self.state.system_volume_entity is not None:
+            current = int(round(self.state.system_volume_entity.get_volume()))
+            target = max(0, min(100, current + step))
+            if target != current and self.state.system_volume_entity.set_volume(target):
+                self.send_messages([self.state.system_volume_entity.get_state_message()])
+                _LOGGER.debug("Local IPC system volume set to %s%%", target)
+            return
+
+        entity = self.state.media_player_entity
+        if entity is None:
+            return
+
+        current = int(round(entity.volume * 100))
+        target = max(0, min(100, current + step))
+        if target == current:
+            return
+
+        entity.music_player.set_volume(target)
+        entity.announce_player.set_volume(target)
+        entity.volume = target / 100.0
+        self.send_messages([entity._get_state_message()])  # noqa: SLF001
+        _LOGGER.debug("Local IPC volume set to %s%%", target)
+
+    def _handle_local_command(self, cmd: str) -> None:
+        cmd = cmd.strip().lower()
+
+        if cmd == "mute_toggle":
+            self._set_muted(not self.state.muted)
+            if self.state.mute_switch_entity is not None:
+                self.state.mute_switch_entity.sync_with_state()
+                self.send_messages(
+                    [SwitchStateResponse(key=self.state.mute_switch_entity.key, state=self.state.muted)]
+                )
+            return
+
+        if cmd == "mute_on":
+            self._set_muted(True)
+            return
+
+        if cmd == "mute_off":
+            self._set_muted(False)
+            return
+
+        if cmd == "volume_up":
+            self._adjust_volume(5)
+            return
+
+        if cmd == "volume_down":
+            self._adjust_volume(-5)
+            return
             
     def handle_voice_event(
         self, event_type: VoiceAssistantEventType, data: Dict[str, str]
     ) -> None:
         _LOGGER.debug("Voice event: type=%s, data=%s", event_type.name, data)
+        self._emit_ipc_event("voice_event", type=event_type.name)
 
         if event_type == VoiceAssistantEventType.VOICE_ASSISTANT_RUN_START:
+            self._emit_ipc_event("run_start")
             self._tts_url = data.get("url")
             self._tts_played = False
             self._continue_conversation = False
         elif event_type == VoiceAssistantEventType.VOICE_ASSISTANT_INTENT_START and self.state.thinking_sound_enabled:
+            self._emit_ipc_event("intent_start")
             # Play short "thinking/processing" sound if configured
             processing = getattr(self.state, "processing_sound", None)
             if processing:
@@ -217,7 +362,13 @@ class VoiceSatelliteProtocol(APIServer):
             VoiceAssistantEventType.VOICE_ASSISTANT_STT_VAD_END,
             VoiceAssistantEventType.VOICE_ASSISTANT_STT_END,
         ):
+            self._emit_ipc_event("listening_end")
             self._is_streaming_audio = False
+        elif event_type in (
+            VoiceAssistantEventType.VOICE_ASSISTANT_STT_START,
+            VoiceAssistantEventType.VOICE_ASSISTANT_STT_VAD_START,
+        ):
+            self._emit_ipc_event("listening_start")
         elif event_type == VoiceAssistantEventType.VOICE_ASSISTANT_INTENT_PROGRESS:
             if data.get("tts_start_streaming") == "1":
                 # Start streaming early
@@ -226,9 +377,16 @@ class VoiceSatelliteProtocol(APIServer):
             if data.get("continue_conversation") == "1":
                 self._continue_conversation = True
         elif event_type == VoiceAssistantEventType.VOICE_ASSISTANT_TTS_END:
+            self._emit_ipc_event("tts_end")
             self._tts_url = data.get("url")
             self.play_tts()
+        elif event_type in (
+            VoiceAssistantEventType.VOICE_ASSISTANT_TTS_START,
+            VoiceAssistantEventType.VOICE_ASSISTANT_TTS_STREAM_START,
+        ):
+            self._emit_ipc_event("tts_start")
         elif event_type == VoiceAssistantEventType.VOICE_ASSISTANT_RUN_END:
+            self._emit_ipc_event("run_end")
             self._is_streaming_audio = False
             if not self._tts_played:
                 self._tts_finished()
@@ -305,6 +463,7 @@ class VoiceSatelliteProtocol(APIServer):
                 ListEntitiesRequest,
                 SubscribeHomeAssistantStatesRequest,
                 MediaPlayerCommandRequest,
+                NumberCommandRequest,
                 SwitchCommandRequest,
             ),
         ):
@@ -347,6 +506,7 @@ class VoiceSatelliteProtocol(APIServer):
                 max_active_wake_words=2,
             )
             _LOGGER.info("Connected to Home Assistant")
+            self._emit_ipc_event("ha_connected")
         elif isinstance(msg, VoiceAssistantSetConfiguration):
             # Change active wake words
             active_wake_words: Set[str] = set()
@@ -405,6 +565,7 @@ class VoiceSatelliteProtocol(APIServer):
         
         wake_word_phrase = wake_word.wake_word
         _LOGGER.debug("Detected wake word: %s", wake_word_phrase)
+        self._emit_ipc_event("wake_word", phrase=wake_word_phrase)
         self.send_messages(
             [VoiceAssistantRequest(start=True, wake_word_phrase=wake_word_phrase)]
         )
@@ -442,6 +603,7 @@ class VoiceSatelliteProtocol(APIServer):
         self.state.music_player.unduck()
 
     def _tts_finished(self) -> None:
+        self._emit_ipc_event("tts_finished")
         self.state.active_wake_words.discard(self.state.stop_word.id)
         self.send_messages([VoiceAssistantAnnounceFinished()])
 
@@ -496,6 +658,7 @@ class VoiceSatelliteProtocol(APIServer):
             self.state.mute_switch_entity.sync_with_state()
 
         _LOGGER.info("Disconnected from Home Assistant; waiting for reconnection")
+        self._emit_ipc_event("ha_disconnected")
 
     def process_packet(self, msg_type: int, packet_data: bytes) -> None:
         super().process_packet(msg_type, packet_data)

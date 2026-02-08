@@ -15,6 +15,7 @@ import soundcard as sc
 from pymicro_wakeword import MicroWakeWord, MicroWakeWordFeatures
 from pyopen_wakeword import OpenWakeWord, OpenWakeWordFeatures
 
+from .local_ipc import LocalIpcBridge
 from .models import AvailableWakeWord, Preferences, ServerState, WakeWordType
 from .mpv_player import MpvMediaPlayer
 from .satellite import VoiceSatelliteProtocol
@@ -47,6 +48,18 @@ async def main() -> None:
     parser.add_argument(
         "--audio-output-device",
         help="mpv name for output device (see --list-output-devices)",
+    )
+    parser.add_argument(
+        "--system-volume-device",
+        help=(
+            "ALSA device for amixer (e.g. sysdefault:CARD=wm8960soundcard). "
+            "Defaults to --audio-output-device without 'alsa/' prefix."
+        ),
+    )
+    parser.add_argument(
+        "--system-volume-control",
+        default="Speaker",
+        help="ALSA mixer control name to expose as speaker volume slider (default: Speaker)",
     )
     parser.add_argument(
         "--list-output-devices",
@@ -135,6 +148,14 @@ async def main() -> None:
 
     args.download_dir = Path(args.download_dir)
     args.download_dir.mkdir(parents=True, exist_ok=True)
+
+    system_volume_device = args.system_volume_device
+    if (
+        system_volume_device is None
+        and args.audio_output_device
+        and args.audio_output_device.startswith("alsa/")
+    ):
+        system_volume_device = args.audio_output_device.split("/", 1)[1]
 
     # Resolve microphone
     if args.audio_input_device is not None:
@@ -242,11 +263,14 @@ async def main() -> None:
         timer_finished_sound=args.timer_finished_sound,
         processing_sound=args.processing_sound,
         mute_sound=args.mute_sound,
-        unmute_sound=args.unmute_sound,          
+        unmute_sound=args.unmute_sound,
+        system_volume_device=system_volume_device,
+        system_volume_control=args.system_volume_control,
         preferences=preferences,
         preferences_path=preferences_path,
         refractory_seconds=args.refractory_seconds,
         download_dir=args.download_dir,
+        ipc_bridge=LocalIpcBridge(),
     )
 
     if args.enable_thinking_sound:
@@ -260,6 +284,9 @@ async def main() -> None:
     process_audio_thread.start()
 
     loop = asyncio.get_running_loop()
+    if state.ipc_bridge is not None:
+        await state.ipc_bridge.start()
+
     server = await loop.create_server(
         lambda: VoiceSatelliteProtocol(state), host=args.host, port=args.port
     )
@@ -277,6 +304,8 @@ async def main() -> None:
     finally:
         state.audio_queue.put_nowait(None)
         process_audio_thread.join()
+        if state.ipc_bridge is not None:
+            state.ipc_bridge.stop()
 
     _LOGGER.debug("Server stopped")
 

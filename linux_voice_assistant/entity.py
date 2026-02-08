@@ -5,8 +5,12 @@ from typing import Callable, List, Optional, Union
 # pylint: disable=no-name-in-module
 from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]
     ListEntitiesMediaPlayerResponse,
+    ListEntitiesNumberResponse,
     ListEntitiesRequest,
     ListEntitiesSwitchResponse,
+    NumberCommandRequest,
+    NumberMode,
+    NumberStateResponse,
     SwitchCommandRequest,
     SwitchStateResponse,
     MediaPlayerCommandRequest,
@@ -271,4 +275,69 @@ class ThinkingSoundEntity(ESPHomeEntity):
         elif isinstance(msg, SubscribeHomeAssistantStatesRequest):
             # Always return our internal switch state
             self.sync_with_state()
-            yield SwitchStateResponse(key=self.key, state=self._switch_state)       
+            yield SwitchStateResponse(key=self.key, state=self._switch_state)
+
+
+class SystemVolumeNumberEntity(ESPHomeEntity):
+    def __init__(
+        self,
+        server: APIServer,
+        key: int,
+        name: str,
+        object_id: str,
+        get_volume: Callable[[], float],
+        set_volume: Callable[[float], bool],
+    ) -> None:
+        ESPHomeEntity.__init__(self, server)
+
+        self.key = key
+        self.name = name
+        self.object_id = object_id
+        self._get_volume = get_volume
+        self._set_volume = set_volume
+        self._state = max(0.0, min(100.0, self._get_volume()))
+
+    def update_get_volume(self, get_volume: Callable[[], float]) -> None:
+        self._get_volume = get_volume
+
+    def update_set_volume(self, set_volume: Callable[[float], bool]) -> None:
+        self._set_volume = set_volume
+
+    def sync_with_state(self) -> None:
+        self._state = max(0.0, min(100.0, self._get_volume()))
+
+    def get_volume(self) -> float:
+        self.sync_with_state()
+        return self._state
+
+    def set_volume(self, volume: float) -> bool:
+        target = max(0.0, min(100.0, float(volume)))
+        if not self._set_volume(target):
+            self.sync_with_state()
+            return False
+        self.sync_with_state()
+        return True
+
+    def get_state_message(self) -> NumberStateResponse:
+        return NumberStateResponse(key=self.key, state=self._state)
+
+    def handle_message(self, msg: message.Message) -> Iterable[message.Message]:
+        if isinstance(msg, NumberCommandRequest) and (msg.key == self.key):
+            self.set_volume(msg.state)
+            yield self.get_state_message()
+        elif isinstance(msg, ListEntitiesRequest):
+            yield ListEntitiesNumberResponse(
+                object_id=self.object_id,
+                key=self.key,
+                name=self.name,
+                icon="mdi:volume-high",
+                min_value=0.0,
+                max_value=100.0,
+                step=1.0,
+                mode=NumberMode.NUMBER_MODE_SLIDER,
+                unit_of_measurement="%",
+                entity_category=EntityCategory.CONFIG,
+            )
+        elif isinstance(msg, SubscribeHomeAssistantStatesRequest):
+            self.sync_with_state()
+            yield self.get_state_message()
