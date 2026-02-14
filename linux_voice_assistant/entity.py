@@ -1,13 +1,16 @@
+import logging
 from abc import abstractmethod
 from collections.abc import Iterable
 from typing import Callable, List, Optional, Union
 
 # pylint: disable=no-name-in-module
 from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]
+    ButtonCommandRequest,
     ListEntitiesMediaPlayerResponse,
     ListEntitiesNumberResponse,
     ListEntitiesRequest,
     ListEntitiesSwitchResponse,
+    ListEntitiesButtonResponse,
     NumberCommandRequest,
     NumberMode,
     NumberStateResponse,
@@ -28,6 +31,8 @@ from google.protobuf import message
 from .api_server import APIServer
 from .mpv_player import MpvMediaPlayer
 from .util import call_all
+
+_LOGGER = logging.getLogger(__name__)
 
 SUPPORTED_MEDIA_PLAYER_FEATURES = (
     MediaPlayerEntityFeature.PLAY
@@ -341,3 +346,73 @@ class SystemVolumeNumberEntity(ESPHomeEntity):
         elif isinstance(msg, SubscribeHomeAssistantStatesRequest):
             self.sync_with_state()
             yield self.get_state_message()
+
+
+class ShutdownButtonEntity(ESPHomeEntity):
+    def __init__(
+        self,
+        server: APIServer,
+        key: int,
+        name: str,
+        object_id: str,
+        shutdown_system: Callable[[], None],
+    ) -> None:
+        ESPHomeEntity.__init__(self, server)
+        self.key = key
+        self.name = name
+        self.object_id = object_id
+        self._shutdown_system = shutdown_system
+
+    def update_shutdown_system(self, shutdown_system: Callable[[], None]) -> None:
+        self._shutdown_system = shutdown_system
+
+    def handle_message(self, msg: message.Message) -> Iterable[message.Message]:
+        if isinstance(msg, ButtonCommandRequest) and (msg.key == self.key):
+            try:
+                _LOGGER.info("Received shutdown button command from Home Assistant")
+                self._shutdown_system()
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Shutdown button action failed")
+        elif isinstance(msg, ListEntitiesRequest):
+            yield ListEntitiesButtonResponse(
+                object_id=self.object_id,
+                key=self.key,
+                name=self.name,
+                entity_category=EntityCategory.CONFIG,
+                icon="mdi:power",
+            )
+
+
+class RebootButtonEntity(ESPHomeEntity):
+    def __init__(
+        self,
+        server: APIServer,
+        key: int,
+        name: str,
+        object_id: str,
+        reboot_system: Callable[[], None],
+    ) -> None:
+        ESPHomeEntity.__init__(self, server)
+        self.key = key
+        self.name = name
+        self.object_id = object_id
+        self._reboot_system = reboot_system
+
+    def update_reboot_system(self, reboot_system: Callable[[], None]) -> None:
+        self._reboot_system = reboot_system
+
+    def handle_message(self, msg: message.Message) -> Iterable[message.Message]:
+        if isinstance(msg, ButtonCommandRequest) and (msg.key == self.key):
+            try:
+                _LOGGER.info("Received reboot button command from Home Assistant")
+                self._reboot_system()
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Reboot button action failed")
+        elif isinstance(msg, ListEntitiesRequest):
+            yield ListEntitiesButtonResponse(
+                object_id=self.object_id,
+                key=self.key,
+                name=self.name,
+                entity_category=EntityCategory.CONFIG,
+                icon="mdi:restart",
+            )

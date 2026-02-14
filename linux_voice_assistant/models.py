@@ -17,6 +17,8 @@ if TYPE_CHECKING:
         ESPHomeEntity,
         MediaPlayerEntity,
         MuteSwitchEntity,
+        RebootButtonEntity,
+        ShutdownButtonEntity,
         SystemVolumeNumberEntity,
         ThinkingSoundEntity,
     )
@@ -89,6 +91,8 @@ class ServerState:
     mute_switch_entity: "Optional[MuteSwitchEntity]" = None
     thinking_sound_entity: "Optional[ThinkingSoundEntity]" = None
     system_volume_entity: "Optional[SystemVolumeNumberEntity]" = None
+    shutdown_button_entity: "Optional[ShutdownButtonEntity]" = None
+    reboot_button_entity: "Optional[RebootButtonEntity]" = None
     wake_words_changed: bool = False
     refractory_seconds: float = 2.0
     thinking_sound_enabled: bool = False

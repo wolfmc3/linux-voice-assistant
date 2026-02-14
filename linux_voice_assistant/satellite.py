@@ -17,6 +17,7 @@ from urllib.request import urlopen
 from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]
     DeviceInfoRequest,
     DeviceInfoResponse,
+    ButtonCommandRequest,
     ListEntitiesDoneResponse,
     ListEntitiesRequest,
     MediaPlayerCommandRequest,
@@ -51,6 +52,8 @@ from .api_server import APIServer
 from .entity import (
     MediaPlayerEntity,
     MuteSwitchEntity,
+    RebootButtonEntity,
+    ShutdownButtonEntity,
     SystemVolumeNumberEntity,
     ThinkingSoundEntity,
 )
@@ -155,6 +158,26 @@ class VoiceSatelliteProtocol(APIServer):
             for extra in existing_system_volume_numbers[1:]:
                 self.state.entities.remove(extra)
 
+        existing_shutdown_buttons = [
+            entity
+            for entity in self.state.entities
+            if isinstance(entity, ShutdownButtonEntity)
+        ]
+        if existing_shutdown_buttons:
+            self.state.shutdown_button_entity = existing_shutdown_buttons[0]
+            for extra in existing_shutdown_buttons[1:]:
+                self.state.entities.remove(extra)
+
+        existing_reboot_buttons = [
+            entity
+            for entity in self.state.entities
+            if isinstance(entity, RebootButtonEntity)
+        ]
+        if existing_reboot_buttons:
+            self.state.reboot_button_entity = existing_reboot_buttons[0]
+            for extra in existing_reboot_buttons[1:]:
+                self.state.entities.remove(extra)
+
         system_volume = self.state.system_volume_entity
         if system_volume is None:
             system_volume = SystemVolumeNumberEntity(
@@ -174,6 +197,40 @@ class VoiceSatelliteProtocol(APIServer):
         system_volume.update_get_volume(self._get_system_volume)
         system_volume.update_set_volume(self._set_system_volume)
         system_volume.sync_with_state()
+
+        shutdown_button = self.state.shutdown_button_entity
+        if shutdown_button is None:
+            shutdown_button = ShutdownButtonEntity(
+                server=self,
+                key=len(state.entities),
+                name="Shutdown",
+                object_id="shutdown",
+                shutdown_system=self._shutdown_system,
+            )
+            self.state.entities.append(shutdown_button)
+            self.state.shutdown_button_entity = shutdown_button
+        elif shutdown_button not in self.state.entities:
+            self.state.entities.append(shutdown_button)
+
+        shutdown_button.server = self
+        shutdown_button.update_shutdown_system(self._shutdown_system)
+
+        reboot_button = self.state.reboot_button_entity
+        if reboot_button is None:
+            reboot_button = RebootButtonEntity(
+                server=self,
+                key=len(state.entities),
+                name="Reboot",
+                object_id="reboot",
+                reboot_system=self._reboot_system,
+            )
+            self.state.entities.append(reboot_button)
+            self.state.reboot_button_entity = reboot_button
+        elif reboot_button not in self.state.entities:
+            self.state.entities.append(reboot_button)
+
+        reboot_button.server = self
+        reboot_button.update_reboot_system(self._reboot_system)
 
         # Add/update thinking sound entity
         thinking_sound_switch = self.state.thinking_sound_entity
@@ -285,6 +342,29 @@ class VoiceSatelliteProtocol(APIServer):
         )
         return False
 
+    def _run_systemctl_action(self, action: str) -> None:
+        commands = (
+            ["sudo", "-n", "systemctl", action],
+            ["systemctl", action],
+        )
+        for cmd in commands:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if result.returncode == 0:
+                _LOGGER.info("Executed system action '%s' using: %s", action, " ".join(cmd))
+                return
+
+        _LOGGER.error(
+            "Failed system action '%s': %s",
+            action,
+            result.stderr.strip() or result.stdout.strip(),
+        )
+
+    def _shutdown_system(self) -> None:
+        self._run_systemctl_action("poweroff")
+
+    def _reboot_system(self) -> None:
+        self._run_systemctl_action("reboot")
+
     def _adjust_volume(self, step: int) -> None:
         if self.state.system_volume_entity is not None:
             current = int(round(self.state.system_volume_entity.get_volume()))
@@ -335,6 +415,14 @@ class VoiceSatelliteProtocol(APIServer):
 
         if cmd == "volume_down":
             self._adjust_volume(-5)
+            return
+
+        if cmd == "shutdown":
+            self._shutdown_system()
+            return
+
+        if cmd == "reboot":
+            self._reboot_system()
             return
             
     def handle_voice_event(
@@ -465,6 +553,7 @@ class VoiceSatelliteProtocol(APIServer):
                 MediaPlayerCommandRequest,
                 NumberCommandRequest,
                 SwitchCommandRequest,
+                ButtonCommandRequest,
             ),
         ):
             for entity in self.state.entities:
