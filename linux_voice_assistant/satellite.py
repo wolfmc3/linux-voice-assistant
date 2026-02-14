@@ -50,8 +50,10 @@ from pyopen_wakeword import OpenWakeWord
 
 from .api_server import APIServer
 from .entity import (
+    LedIntensityNumberEntity,
     MediaPlayerEntity,
     MuteSwitchEntity,
+    NightModeSwitchEntity,
     RebootButtonEntity,
     ShutdownButtonEntity,
     SystemVolumeNumberEntity,
@@ -148,6 +150,16 @@ class VoiceSatelliteProtocol(APIServer):
             for extra in existing_thinking_sound_switches[1:]:
                 self.state.entities.remove(extra)
 
+        existing_night_mode_switches = [
+            entity
+            for entity in self.state.entities
+            if isinstance(entity, NightModeSwitchEntity)
+        ]
+        if existing_night_mode_switches:
+            self.state.night_mode_entity = existing_night_mode_switches[0]
+            for extra in existing_night_mode_switches[1:]:
+                self.state.entities.remove(extra)
+
         existing_system_volume_numbers = [
             entity
             for entity in self.state.entities
@@ -156,6 +168,16 @@ class VoiceSatelliteProtocol(APIServer):
         if existing_system_volume_numbers:
             self.state.system_volume_entity = existing_system_volume_numbers[0]
             for extra in existing_system_volume_numbers[1:]:
+                self.state.entities.remove(extra)
+
+        existing_led_intensity_numbers = [
+            entity
+            for entity in self.state.entities
+            if isinstance(entity, LedIntensityNumberEntity)
+        ]
+        if existing_led_intensity_numbers:
+            self.state.led_intensity_entity = existing_led_intensity_numbers[0]
+            for extra in existing_led_intensity_numbers[1:]:
                 self.state.entities.remove(extra)
 
         existing_shutdown_buttons = [
@@ -197,6 +219,46 @@ class VoiceSatelliteProtocol(APIServer):
         system_volume.update_get_volume(self._get_system_volume)
         system_volume.update_set_volume(self._set_system_volume)
         system_volume.sync_with_state()
+
+        led_intensity = self.state.led_intensity_entity
+        if led_intensity is None:
+            led_intensity = LedIntensityNumberEntity(
+                server=self,
+                key=len(state.entities),
+                name="LED Intensity",
+                object_id="led_intensity",
+                get_intensity=self._get_led_intensity,
+                set_intensity=self._set_led_intensity,
+            )
+            self.state.entities.append(led_intensity)
+            self.state.led_intensity_entity = led_intensity
+        elif led_intensity not in self.state.entities:
+            self.state.entities.append(led_intensity)
+
+        led_intensity.server = self
+        led_intensity.update_get_intensity(self._get_led_intensity)
+        led_intensity.update_set_intensity(self._set_led_intensity)
+        led_intensity.sync_with_state()
+
+        led_night_mode = self.state.night_mode_entity
+        if led_night_mode is None:
+            led_night_mode = NightModeSwitchEntity(
+                server=self,
+                key=len(state.entities),
+                name="LED Night Mode",
+                object_id="led_night_mode",
+                get_enabled=self._get_led_night_mode,
+                set_enabled=self._set_led_night_mode,
+            )
+            self.state.entities.append(led_night_mode)
+            self.state.night_mode_entity = led_night_mode
+        elif led_night_mode not in self.state.entities:
+            self.state.entities.append(led_night_mode)
+
+        led_night_mode.server = self
+        led_night_mode.update_get_enabled(self._get_led_night_mode)
+        led_night_mode.update_set_enabled(self._set_led_night_mode)
+        led_night_mode.sync_with_state()
 
         shutdown_button = self.state.shutdown_button_entity
         if shutdown_button is None:
@@ -263,6 +325,8 @@ class VoiceSatelliteProtocol(APIServer):
 
         if self.state.ipc_bridge is not None:
             self.state.ipc_bridge.set_control_handler(self._handle_local_command)
+            self._publish_led_intensity()
+            self._publish_led_night_mode()
     
     def _set_thinking_sound_enabled(self, new_state: bool) -> None:
         self.state.thinking_sound_enabled = bool(new_state)
@@ -274,6 +338,51 @@ class VoiceSatelliteProtocol(APIServer):
             _LOGGER.debug("Thinking sound disabled")
             pass
         self.state.save_preferences()
+
+    def _get_led_night_mode(self) -> bool:
+        return bool(int(getattr(self.state.preferences, "led_night_mode", 0)))
+
+    def _publish_led_night_mode(self) -> None:
+        self._emit_ipc_event("led_night_mode", value=self._get_led_night_mode())
+
+    def _set_led_night_mode(self, enabled: bool) -> None:
+        new_value = 1 if bool(enabled) else 0
+        if new_value == int(getattr(self.state.preferences, "led_night_mode", 0)):
+            self._publish_led_night_mode()
+            return
+
+        self.state.preferences.led_night_mode = new_value
+        self.state.save_preferences()
+        _LOGGER.info("LED night mode %s", "enabled" if new_value else "disabled")
+        self._publish_led_night_mode()
+
+    @staticmethod
+    def _normalize_led_intensity(value: object) -> int:
+        try:
+            parsed = int(round(float(value)))
+        except (TypeError, ValueError):
+            return 100
+        return max(0, min(100, parsed))
+
+    def _get_led_intensity(self) -> float:
+        normalized = self._normalize_led_intensity(self.state.preferences.led_intensity)
+        self.state.preferences.led_intensity = normalized
+        return float(normalized)
+
+    def _publish_led_intensity(self) -> None:
+        self._emit_ipc_event("led_intensity", value=self._get_led_intensity())
+
+    def _set_led_intensity(self, value: float) -> bool:
+        normalized = self._normalize_led_intensity(value)
+        if normalized == self.state.preferences.led_intensity:
+            self._publish_led_intensity()
+            return True
+
+        self.state.preferences.led_intensity = normalized
+        self.state.save_preferences()
+        _LOGGER.info("LED intensity set to %s%%", normalized)
+        self._publish_led_intensity()
+        return True
 
     def _set_muted(self, new_state: bool) -> None:
         self.state.muted = bool(new_state)
@@ -596,6 +705,8 @@ class VoiceSatelliteProtocol(APIServer):
             )
             _LOGGER.info("Connected to Home Assistant")
             self._emit_ipc_event("ha_connected")
+            self._publish_led_intensity()
+            self._publish_led_night_mode()
         elif isinstance(msg, VoiceAssistantSetConfiguration):
             # Change active wake words
             active_wake_words: Set[str] = set()

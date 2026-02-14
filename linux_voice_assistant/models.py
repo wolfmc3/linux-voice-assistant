@@ -15,8 +15,10 @@ if TYPE_CHECKING:
     from .local_ipc import LocalIpcBridge
     from .entity import (
         ESPHomeEntity,
+        LedIntensityNumberEntity,
         MediaPlayerEntity,
         MuteSwitchEntity,
+        NightModeSwitchEntity,
         RebootButtonEntity,
         ShutdownButtonEntity,
         SystemVolumeNumberEntity,
@@ -62,6 +64,8 @@ class AvailableWakeWord:
 class Preferences:
     active_wake_words: List[str] = field(default_factory=list)
     thinking_sound: int = 0  # 0 = disabled, 1 = enabled
+    led_intensity: int = 100  # 0..100%
+    led_night_mode: int = 0  # 0 = disabled, 1 = enabled
 
 @dataclass
 class ServerState:
@@ -93,6 +97,8 @@ class ServerState:
     system_volume_entity: "Optional[SystemVolumeNumberEntity]" = None
     shutdown_button_entity: "Optional[ShutdownButtonEntity]" = None
     reboot_button_entity: "Optional[RebootButtonEntity]" = None
+    led_intensity_entity: "Optional[LedIntensityNumberEntity]" = None
+    night_mode_entity: "Optional[NightModeSwitchEntity]" = None
     wake_words_changed: bool = False
     refractory_seconds: float = 2.0
     thinking_sound_enabled: bool = False

@@ -283,6 +283,53 @@ class ThinkingSoundEntity(ESPHomeEntity):
             yield SwitchStateResponse(key=self.key, state=self._switch_state)
 
 
+class NightModeSwitchEntity(ESPHomeEntity):
+    def __init__(
+        self,
+        server: APIServer,
+        key: int,
+        name: str,
+        object_id: str,
+        get_enabled: Callable[[], bool],
+        set_enabled: Callable[[bool], None],
+    ) -> None:
+        ESPHomeEntity.__init__(self, server)
+
+        self.key = key
+        self.name = name
+        self.object_id = object_id
+        self._get_enabled = get_enabled
+        self._set_enabled = set_enabled
+        self._switch_state = self._get_enabled()
+
+    def update_get_enabled(self, get_enabled: Callable[[], bool]) -> None:
+        self._get_enabled = get_enabled
+
+    def update_set_enabled(self, set_enabled: Callable[[bool], None]) -> None:
+        self._set_enabled = set_enabled
+
+    def sync_with_state(self) -> None:
+        self._switch_state = self._get_enabled()
+
+    def handle_message(self, msg: message.Message) -> Iterable[message.Message]:
+        if isinstance(msg, SwitchCommandRequest) and (msg.key == self.key):
+            new_state = bool(msg.state)
+            self._switch_state = new_state
+            self._set_enabled(new_state)
+            yield SwitchStateResponse(key=self.key, state=self._switch_state)
+        elif isinstance(msg, ListEntitiesRequest):
+            yield ListEntitiesSwitchResponse(
+                object_id=self.object_id,
+                key=self.key,
+                name=self.name,
+                entity_category=EntityCategory.CONFIG,
+                icon="mdi:weather-night",
+            )
+        elif isinstance(msg, SubscribeHomeAssistantStatesRequest):
+            self.sync_with_state()
+            yield SwitchStateResponse(key=self.key, state=self._switch_state)
+
+
 class SystemVolumeNumberEntity(ESPHomeEntity):
     def __init__(
         self,
@@ -336,6 +383,60 @@ class SystemVolumeNumberEntity(ESPHomeEntity):
                 key=self.key,
                 name=self.name,
                 icon="mdi:volume-high",
+                min_value=0.0,
+                max_value=100.0,
+                step=1.0,
+                mode=NumberMode.NUMBER_MODE_SLIDER,
+                unit_of_measurement="%",
+                entity_category=EntityCategory.CONFIG,
+            )
+        elif isinstance(msg, SubscribeHomeAssistantStatesRequest):
+            self.sync_with_state()
+            yield self.get_state_message()
+
+
+class LedIntensityNumberEntity(ESPHomeEntity):
+    def __init__(
+        self,
+        server: APIServer,
+        key: int,
+        name: str,
+        object_id: str,
+        get_intensity: Callable[[], float],
+        set_intensity: Callable[[float], bool],
+    ) -> None:
+        ESPHomeEntity.__init__(self, server)
+
+        self.key = key
+        self.name = name
+        self.object_id = object_id
+        self._get_intensity = get_intensity
+        self._set_intensity = set_intensity
+        self._state = max(0.0, min(100.0, self._get_intensity()))
+
+    def update_get_intensity(self, get_intensity: Callable[[], float]) -> None:
+        self._get_intensity = get_intensity
+
+    def update_set_intensity(self, set_intensity: Callable[[float], bool]) -> None:
+        self._set_intensity = set_intensity
+
+    def sync_with_state(self) -> None:
+        self._state = max(0.0, min(100.0, self._get_intensity()))
+
+    def get_state_message(self) -> NumberStateResponse:
+        return NumberStateResponse(key=self.key, state=self._state)
+
+    def handle_message(self, msg: message.Message) -> Iterable[message.Message]:
+        if isinstance(msg, NumberCommandRequest) and (msg.key == self.key):
+            self._set_intensity(msg.state)
+            self.sync_with_state()
+            yield self.get_state_message()
+        elif isinstance(msg, ListEntitiesRequest):
+            yield ListEntitiesNumberResponse(
+                object_id=self.object_id,
+                key=self.key,
+                name=self.name,
+                icon="mdi:led-strip-variant",
                 min_value=0.0,
                 max_value=100.0,
                 step=1.0,
