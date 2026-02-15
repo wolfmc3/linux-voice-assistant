@@ -3,6 +3,7 @@ import argparse
 import asyncio
 import json
 import logging
+import statistics
 import sys
 import threading
 import time
@@ -325,6 +326,9 @@ def process_audio(state: ServerState, mic, block_size: int):
     has_oww = False
 
     last_active: Optional[float] = None
+    debug_scores_enabled = _LOGGER.isEnabledFor(logging.DEBUG)
+    score_log_interval = 0.30
+    last_score_log: Dict[str, float] = {}
 
     try:
         _LOGGER.debug("Opening audio input device: %s", mic.name)
@@ -374,15 +378,45 @@ def process_audio(state: ServerState, mic, block_size: int):
 
                     for wake_word in wake_words:
                         activated = False
+                        score: Optional[float] = None
+                        threshold: float
+
                         if isinstance(wake_word, MicroWakeWord):
+                            threshold = wake_word.probability_cutoff
                             for micro_input in micro_inputs:
                                 if wake_word.process_streaming(micro_input):
                                     activated = True
+                                probs = getattr(wake_word, "_probabilities", None)
+                                if probs:
+                                    score = float(statistics.mean(probs))
                         elif isinstance(wake_word, OpenWakeWord):
+                            threshold = (
+                                state.wake_word_threshold
+                                if state.wake_word_threshold is not None
+                                else 0.5
+                            )
                             for oww_input in oww_inputs:
                                 for prob in wake_word.process_streaming(oww_input):
-                                    if prob > 0.5:
+                                    score = float(prob)
+                                    if prob >= threshold:
                                         activated = True
+                        else:
+                            continue
+
+                        if debug_scores_enabled and (score is not None):
+                            now = time.monotonic()
+                            last_logged = last_score_log.get(wake_word.id)
+                            if (last_logged is None) or (
+                                (now - last_logged) >= score_log_interval
+                            ):
+                                _LOGGER.debug(
+                                    "Wake-word score: model=%s score=%.1f%% threshold=%.1f%% result=%s",
+                                    wake_word.id,
+                                    score * 100.0,
+                                    threshold * 100.0,
+                                    "triggered" if activated else "not_triggered",
+                                )
+                                last_score_log[wake_word.id] = now
 
                         if activated and not state.muted:
                             # Check refractory

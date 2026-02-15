@@ -11,9 +11,12 @@ from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]
     ListEntitiesRequest,
     ListEntitiesSwitchResponse,
     ListEntitiesButtonResponse,
+    ListEntitiesSelectResponse,
     NumberCommandRequest,
     NumberMode,
     NumberStateResponse,
+    SelectCommandRequest,
+    SelectStateResponse,
     SwitchCommandRequest,
     SwitchStateResponse,
     MediaPlayerCommandRequest,
@@ -29,6 +32,11 @@ from aioesphomeapi.model import (
 from google.protobuf import message
 
 from .api_server import APIServer
+from .models import (
+    WAKE_WORD_THRESHOLD_MAX,
+    WAKE_WORD_THRESHOLD_MIN,
+    WAKE_WORD_THRESHOLD_PRESET_OPTIONS,
+)
 from .mpv_player import MpvMediaPlayer
 from .util import call_all
 
@@ -439,6 +447,117 @@ class LedIntensityNumberEntity(ESPHomeEntity):
                 icon="mdi:led-strip-variant",
                 min_value=0.0,
                 max_value=100.0,
+                step=1.0,
+                mode=NumberMode.NUMBER_MODE_SLIDER,
+                unit_of_measurement="%",
+                entity_category=EntityCategory.CONFIG,
+            )
+        elif isinstance(msg, SubscribeHomeAssistantStatesRequest):
+            self.sync_with_state()
+            yield self.get_state_message()
+
+
+class WakeWordThresholdPresetSelectEntity(ESPHomeEntity):
+    def __init__(
+        self,
+        server: APIServer,
+        key: int,
+        name: str,
+        object_id: str,
+        get_preset: Callable[[], str],
+        set_preset: Callable[[str], None],
+    ) -> None:
+        ESPHomeEntity.__init__(self, server)
+
+        self.key = key
+        self.name = name
+        self.object_id = object_id
+        self._get_preset = get_preset
+        self._set_preset = set_preset
+        self._state = self._get_preset()
+
+    def update_get_preset(self, get_preset: Callable[[], str]) -> None:
+        self._get_preset = get_preset
+
+    def update_set_preset(self, set_preset: Callable[[str], None]) -> None:
+        self._set_preset = set_preset
+
+    def sync_with_state(self) -> None:
+        self._state = self._get_preset()
+
+    def get_state_message(self) -> SelectStateResponse:
+        return SelectStateResponse(key=self.key, state=self._state)
+
+    def handle_message(self, msg: message.Message) -> Iterable[message.Message]:
+        if isinstance(msg, SelectCommandRequest) and (msg.key == self.key):
+            self._set_preset(msg.state)
+            self.sync_with_state()
+            yield self.get_state_message()
+        elif isinstance(msg, ListEntitiesRequest):
+            yield ListEntitiesSelectResponse(
+                object_id=self.object_id,
+                key=self.key,
+                name=self.name,
+                icon="mdi:tune-variant",
+                options=WAKE_WORD_THRESHOLD_PRESET_OPTIONS,
+                entity_category=EntityCategory.CONFIG,
+            )
+        elif isinstance(msg, SubscribeHomeAssistantStatesRequest):
+            self.sync_with_state()
+            yield self.get_state_message()
+
+
+class WakeWordThresholdNumberEntity(ESPHomeEntity):
+    def __init__(
+        self,
+        server: APIServer,
+        key: int,
+        name: str,
+        object_id: str,
+        get_threshold: Callable[[], float],
+        set_threshold: Callable[[float], bool],
+    ) -> None:
+        ESPHomeEntity.__init__(self, server)
+
+        self.key = key
+        self.name = name
+        self.object_id = object_id
+        self._get_threshold = get_threshold
+        self._set_threshold = set_threshold
+        self._state = max(
+            WAKE_WORD_THRESHOLD_MIN * 100.0,
+            min(WAKE_WORD_THRESHOLD_MAX * 100.0, self._get_threshold() * 100.0),
+        )
+
+    def update_get_threshold(self, get_threshold: Callable[[], float]) -> None:
+        self._get_threshold = get_threshold
+
+    def update_set_threshold(self, set_threshold: Callable[[float], bool]) -> None:
+        self._set_threshold = set_threshold
+
+    def sync_with_state(self) -> None:
+        self._state = max(
+            WAKE_WORD_THRESHOLD_MIN * 100.0,
+            min(WAKE_WORD_THRESHOLD_MAX * 100.0, self._get_threshold() * 100.0),
+        )
+
+    def get_state_message(self) -> NumberStateResponse:
+        return NumberStateResponse(key=self.key, state=self._state)
+
+    def handle_message(self, msg: message.Message) -> Iterable[message.Message]:
+        if isinstance(msg, NumberCommandRequest) and (msg.key == self.key):
+            # Entity value is in percent for UI readability.
+            self._set_threshold(msg.state / 100.0)
+            self.sync_with_state()
+            yield self.get_state_message()
+        elif isinstance(msg, ListEntitiesRequest):
+            yield ListEntitiesNumberResponse(
+                object_id=self.object_id,
+                key=self.key,
+                name=self.name,
+                icon="mdi:percent",
+                min_value=WAKE_WORD_THRESHOLD_MIN * 100.0,
+                max_value=WAKE_WORD_THRESHOLD_MAX * 100.0,
                 step=1.0,
                 mode=NumberMode.NUMBER_MODE_SLIDER,
                 unit_of_measurement="%",

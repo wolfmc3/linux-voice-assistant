@@ -22,6 +22,7 @@ from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]
     ListEntitiesRequest,
     MediaPlayerCommandRequest,
     NumberCommandRequest,
+    SelectCommandRequest,
     SwitchStateResponse,
     SubscribeHomeAssistantStatesRequest,
     SwitchCommandRequest,
@@ -58,8 +59,20 @@ from .entity import (
     ShutdownButtonEntity,
     SystemVolumeNumberEntity,
     ThinkingSoundEntity,
+    WakeWordThresholdNumberEntity,
+    WakeWordThresholdPresetSelectEntity,
 )
-from .models import AvailableWakeWord, ServerState, WakeWordType
+from .models import (
+    AvailableWakeWord,
+    ServerState,
+    WakeWordType,
+    WAKE_WORD_THRESHOLD_DEFAULT_CUSTOM,
+    WAKE_WORD_THRESHOLD_PRESET_CUSTOM,
+    WAKE_WORD_THRESHOLD_PRESET_MODEL_DEFAULT,
+    normalize_wake_word_threshold,
+    normalize_wake_word_threshold_preset,
+    resolve_wake_word_threshold,
+)
 from .util import call_all
 
 _LOGGER = logging.getLogger(__name__)
@@ -180,6 +193,26 @@ class VoiceSatelliteProtocol(APIServer):
             for extra in existing_led_intensity_numbers[1:]:
                 self.state.entities.remove(extra)
 
+        existing_wake_word_threshold_selects = [
+            entity
+            for entity in self.state.entities
+            if isinstance(entity, WakeWordThresholdPresetSelectEntity)
+        ]
+        if existing_wake_word_threshold_selects:
+            self.state.wake_word_threshold_select_entity = existing_wake_word_threshold_selects[0]
+            for extra in existing_wake_word_threshold_selects[1:]:
+                self.state.entities.remove(extra)
+
+        existing_wake_word_threshold_numbers = [
+            entity
+            for entity in self.state.entities
+            if isinstance(entity, WakeWordThresholdNumberEntity)
+        ]
+        if existing_wake_word_threshold_numbers:
+            self.state.wake_word_threshold_number_entity = existing_wake_word_threshold_numbers[0]
+            for extra in existing_wake_word_threshold_numbers[1:]:
+                self.state.entities.remove(extra)
+
         existing_shutdown_buttons = [
             entity
             for entity in self.state.entities
@@ -260,6 +293,46 @@ class VoiceSatelliteProtocol(APIServer):
         led_night_mode.update_set_enabled(self._set_led_night_mode)
         led_night_mode.sync_with_state()
 
+        wake_word_threshold_preset = self.state.wake_word_threshold_select_entity
+        if wake_word_threshold_preset is None:
+            wake_word_threshold_preset = WakeWordThresholdPresetSelectEntity(
+                server=self,
+                key=len(state.entities),
+                name="Wake Word Threshold Preset",
+                object_id="wake_word_threshold_preset",
+                get_preset=self._get_wake_word_threshold_preset,
+                set_preset=self._set_wake_word_threshold_preset,
+            )
+            self.state.entities.append(wake_word_threshold_preset)
+            self.state.wake_word_threshold_select_entity = wake_word_threshold_preset
+        elif wake_word_threshold_preset not in self.state.entities:
+            self.state.entities.append(wake_word_threshold_preset)
+
+        wake_word_threshold_preset.server = self
+        wake_word_threshold_preset.update_get_preset(self._get_wake_word_threshold_preset)
+        wake_word_threshold_preset.update_set_preset(self._set_wake_word_threshold_preset)
+        wake_word_threshold_preset.sync_with_state()
+
+        wake_word_threshold_number = self.state.wake_word_threshold_number_entity
+        if wake_word_threshold_number is None:
+            wake_word_threshold_number = WakeWordThresholdNumberEntity(
+                server=self,
+                key=len(state.entities),
+                name="Wake Word Threshold",
+                object_id="wake_word_threshold",
+                get_threshold=self._get_wake_word_threshold_custom,
+                set_threshold=self._set_wake_word_threshold_custom,
+            )
+            self.state.entities.append(wake_word_threshold_number)
+            self.state.wake_word_threshold_number_entity = wake_word_threshold_number
+        elif wake_word_threshold_number not in self.state.entities:
+            self.state.entities.append(wake_word_threshold_number)
+
+        wake_word_threshold_number.server = self
+        wake_word_threshold_number.update_get_threshold(self._get_wake_word_threshold_custom)
+        wake_word_threshold_number.update_set_threshold(self._set_wake_word_threshold_custom)
+        wake_word_threshold_number.sync_with_state()
+
         shutdown_button = self.state.shutdown_button_entity
         if shutdown_button is None:
             shutdown_button = ShutdownButtonEntity(
@@ -321,6 +394,7 @@ class VoiceSatelliteProtocol(APIServer):
         thinking_sound_switch.update_set_thinking_sound_enabled(self._set_thinking_sound_enabled)
         thinking_sound_switch.sync_with_state()
 
+        self._apply_wake_word_threshold(log_startup=True)
         self.state.satellite = self
 
         if self.state.ipc_bridge is not None:
@@ -383,6 +457,103 @@ class VoiceSatelliteProtocol(APIServer):
         _LOGGER.info("LED intensity set to %s%%", normalized)
         self._publish_led_intensity()
         return True
+
+    def _get_wake_word_threshold_preset(self) -> str:
+        preset = normalize_wake_word_threshold_preset(
+            getattr(self.state.preferences, "wake_word_threshold_preset", WAKE_WORD_THRESHOLD_PRESET_MODEL_DEFAULT)
+        )
+        self.state.preferences.wake_word_threshold_preset = preset
+        return preset
+
+    def _get_wake_word_threshold_custom(self) -> float:
+        custom = normalize_wake_word_threshold(
+            getattr(self.state.preferences, "wake_word_threshold_custom", WAKE_WORD_THRESHOLD_DEFAULT_CUSTOM)
+        )
+        self.state.preferences.wake_word_threshold_custom = custom
+        return custom
+
+    def _set_wake_word_threshold_preset(self, preset: str) -> None:
+        normalized = normalize_wake_word_threshold_preset(preset)
+        if normalized == self._get_wake_word_threshold_preset():
+            self._apply_wake_word_threshold()
+            self._publish_wake_word_threshold_state()
+            return
+
+        self.state.preferences.wake_word_threshold_preset = normalized
+        self.state.save_preferences()
+        self._apply_wake_word_threshold()
+        self._publish_wake_word_threshold_state()
+        _LOGGER.info("Wake word threshold preset set to %s", normalized)
+
+    def _set_wake_word_threshold_custom(self, threshold: float) -> bool:
+        normalized = normalize_wake_word_threshold(threshold)
+        current_custom = self._get_wake_word_threshold_custom()
+        current_preset = self._get_wake_word_threshold_preset()
+
+        changed = False
+        if abs(normalized - current_custom) > 1e-6:
+            self.state.preferences.wake_word_threshold_custom = normalized
+            changed = True
+
+        if current_preset != WAKE_WORD_THRESHOLD_PRESET_CUSTOM:
+            self.state.preferences.wake_word_threshold_preset = WAKE_WORD_THRESHOLD_PRESET_CUSTOM
+            changed = True
+
+        if changed:
+            self.state.save_preferences()
+            _LOGGER.info("Wake word threshold custom set to %.2f%%", normalized * 100.0)
+
+        self._apply_wake_word_threshold()
+        self._publish_wake_word_threshold_state()
+        return True
+
+    def _apply_wake_word_threshold(
+        self,
+        *,
+        log_startup: bool = False,
+        log_change: bool = True,
+    ) -> None:
+        threshold = resolve_wake_word_threshold(
+            self._get_wake_word_threshold_preset(),
+            self._get_wake_word_threshold_custom(),
+        )
+        self.state.wake_word_threshold = threshold
+
+        for wake_word in self.state.wake_words.values():
+            if isinstance(wake_word, MicroWakeWord):
+                if wake_word.id not in self.state.wake_word_default_thresholds:
+                    self.state.wake_word_default_thresholds[wake_word.id] = wake_word.probability_cutoff
+
+                if threshold is None:
+                    default_threshold = self.state.wake_word_default_thresholds.get(wake_word.id)
+                    if default_threshold is not None:
+                        wake_word.probability_cutoff = default_threshold
+                    continue
+
+                wake_word.probability_cutoff = threshold
+
+        if threshold is None:
+            message = "Wake word threshold using model defaults"
+        else:
+            message = f"Wake word threshold active: {threshold * 100:.2f}%"
+
+        if log_startup:
+            _LOGGER.debug("%s (preset=%s)", message, self._get_wake_word_threshold_preset())
+        elif not log_change:
+            _LOGGER.debug("%s (preset=%s)", message, self._get_wake_word_threshold_preset())
+        else:
+            _LOGGER.info("%s (preset=%s)", message, self._get_wake_word_threshold_preset())
+
+    def _publish_wake_word_threshold_state(self) -> None:
+        states = []
+        if self.state.wake_word_threshold_select_entity is not None:
+            self.state.wake_word_threshold_select_entity.sync_with_state()
+            states.append(self.state.wake_word_threshold_select_entity.get_state_message())
+        if self.state.wake_word_threshold_number_entity is not None:
+            self.state.wake_word_threshold_number_entity.sync_with_state()
+            states.append(self.state.wake_word_threshold_number_entity.get_state_message())
+        if states:
+            self.send_messages(states)
 
     def _set_muted(self, new_state: bool) -> None:
         self.state.muted = bool(new_state)
@@ -661,6 +832,7 @@ class VoiceSatelliteProtocol(APIServer):
                 SubscribeHomeAssistantStatesRequest,
                 MediaPlayerCommandRequest,
                 NumberCommandRequest,
+                SelectCommandRequest,
                 SwitchCommandRequest,
                 ButtonCommandRequest,
             ),
@@ -707,6 +879,7 @@ class VoiceSatelliteProtocol(APIServer):
             self._emit_ipc_event("ha_connected")
             self._publish_led_intensity()
             self._publish_led_night_mode()
+            self._publish_wake_word_threshold_state()
         elif isinstance(msg, VoiceAssistantSetConfiguration):
             # Change active wake words
             active_wake_words: Set[str] = set()
@@ -731,7 +904,9 @@ class VoiceSatelliteProtocol(APIServer):
                     self.state.available_wake_words[wake_word_id] = model_info
 
                 _LOGGER.debug("Loading wake word: %s", model_info.wake_word_path)
-                self.state.wake_words[wake_word_id] = model_info.load()
+                loaded_wake_word = model_info.load()
+                self.state.wake_words[wake_word_id] = loaded_wake_word
+                self._apply_wake_word_threshold(log_change=False)
 
                 _LOGGER.info("Wake word set: %s", wake_word_id)
                 active_wake_words.add(wake_word_id)

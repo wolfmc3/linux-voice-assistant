@@ -23,6 +23,8 @@ if TYPE_CHECKING:
         ShutdownButtonEntity,
         SystemVolumeNumberEntity,
         ThinkingSoundEntity,
+        WakeWordThresholdNumberEntity,
+        WakeWordThresholdPresetSelectEntity,
     )
     from .mpv_player import MpvMediaPlayer
     from .satellite import VoiceSatelliteProtocol
@@ -33,6 +35,57 @@ _LOGGER = logging.getLogger(__name__)
 class WakeWordType(str, Enum):
     MICRO_WAKE_WORD = "micro"
     OPEN_WAKE_WORD = "openWakeWord"
+
+
+WAKE_WORD_THRESHOLD_PRESET_MODEL_DEFAULT = "ModelDefault"
+WAKE_WORD_THRESHOLD_PRESET_CUSTOM = "Custom"
+WAKE_WORD_THRESHOLD_PRESETS: Dict[str, float] = {
+    "Strict": 0.60,
+    "Default": 0.50,
+    "Sensitive": 0.45,
+    "VerySensitive": 0.40,
+}
+WAKE_WORD_THRESHOLD_PRESET_OPTIONS: List[str] = [
+    WAKE_WORD_THRESHOLD_PRESET_MODEL_DEFAULT,
+    *WAKE_WORD_THRESHOLD_PRESETS.keys(),
+    WAKE_WORD_THRESHOLD_PRESET_CUSTOM,
+]
+WAKE_WORD_THRESHOLD_MIN = 0.10
+WAKE_WORD_THRESHOLD_MAX = 0.95
+WAKE_WORD_THRESHOLD_DEFAULT_CUSTOM = WAKE_WORD_THRESHOLD_PRESETS["Default"]
+
+
+def normalize_wake_word_threshold(value: object) -> float:
+    """Normalize numeric threshold into valid bounds."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = WAKE_WORD_THRESHOLD_DEFAULT_CUSTOM
+
+    return max(WAKE_WORD_THRESHOLD_MIN, min(WAKE_WORD_THRESHOLD_MAX, parsed))
+
+
+def normalize_wake_word_threshold_preset(value: object) -> str:
+    """Normalize threshold preset to known options."""
+    if isinstance(value, str) and (value in WAKE_WORD_THRESHOLD_PRESET_OPTIONS):
+        return value
+
+    return WAKE_WORD_THRESHOLD_PRESET_MODEL_DEFAULT
+
+
+def resolve_wake_word_threshold(
+    preset: object,
+    custom_value: object,
+) -> Optional[float]:
+    """Resolve threshold value from preset/custom settings."""
+    normalized_preset = normalize_wake_word_threshold_preset(preset)
+    if normalized_preset == WAKE_WORD_THRESHOLD_PRESET_MODEL_DEFAULT:
+        return None
+
+    if normalized_preset == WAKE_WORD_THRESHOLD_PRESET_CUSTOM:
+        return normalize_wake_word_threshold(custom_value)
+
+    return WAKE_WORD_THRESHOLD_PRESETS[normalized_preset]
 
 
 @dataclass
@@ -66,6 +119,8 @@ class Preferences:
     thinking_sound: int = 0  # 0 = disabled, 1 = enabled
     led_intensity: int = 100  # 0..100%
     led_night_mode: int = 0  # 0 = disabled, 1 = enabled
+    wake_word_threshold_preset: str = WAKE_WORD_THRESHOLD_PRESET_MODEL_DEFAULT
+    wake_word_threshold_custom: float = WAKE_WORD_THRESHOLD_DEFAULT_CUSTOM
 
 @dataclass
 class ServerState:
@@ -99,12 +154,16 @@ class ServerState:
     reboot_button_entity: "Optional[RebootButtonEntity]" = None
     led_intensity_entity: "Optional[LedIntensityNumberEntity]" = None
     night_mode_entity: "Optional[NightModeSwitchEntity]" = None
+    wake_word_threshold_select_entity: "Optional[WakeWordThresholdPresetSelectEntity]" = None
+    wake_word_threshold_number_entity: "Optional[WakeWordThresholdNumberEntity]" = None
     wake_words_changed: bool = False
     refractory_seconds: float = 2.0
     thinking_sound_enabled: bool = False
     muted: bool = False
     connected: bool = False
     ipc_bridge: "Optional[LocalIpcBridge]" = None
+    wake_word_threshold: Optional[float] = None
+    wake_word_default_thresholds: Dict[str, float] = field(default_factory=dict)
     
     def save_preferences(self) -> None:
         """Save preferences as JSON."""
