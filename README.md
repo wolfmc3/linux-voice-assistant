@@ -78,6 +78,39 @@ If you want to add [other wakewords][wakewords-collection], make sure to create 
 
 Add `--wake-word-dir <DIR>` with the directory containing `glados.tflite` and `glados.json` to your command-line.
 
+### Wake-Word Threshold (Home Assistant)
+
+The satellite now exposes two configuration entities in Home Assistant:
+
+* **Wake Word Threshold Preset** (`select`): choose one preset:
+  * `ModelDefault` (backward-compatible behavior)
+  * `Strict` = `60%`
+  * `Default` = `50%`
+  * `Sensitive` = `45%`
+  * `VerySensitive` = `40%`
+  * `Custom` (uses the numeric value below)
+* **Wake Word Threshold** (`number`): custom threshold slider in `%` (`10..95`), used when preset is `Custom`.
+
+How to change it in Home Assistant:
+
+1. Open your Linux Voice Assistant device page.
+2. Set **Wake Word Threshold Preset** to one of the presets above, or `Custom`.
+3. If using `Custom`, set **Wake Word Threshold** to the desired percentage.
+
+Changes are applied live (no full service restart required) and persisted to `preferences.json`.
+
+### Wake-Word Score Debug Logs
+
+Enable debug logs with:
+
+``` sh
+python3 -m linux_voice_assistant ... --debug
+```
+
+When debug is enabled, wake-word scoring logs are emitted at a throttled interval (about every 300ms per model), for example:
+
+* `model=<id>, score=<pct>, threshold=<pct>, result=triggered|not_triggered`
+
 ## Connecting to Home Assistant
 
 1. In Home Assistant, go to "Settings" -> "Device & services"
