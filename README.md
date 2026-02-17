@@ -60,6 +60,64 @@ python3 -m linux_voice_assistant ... \
 
 This enables the thinking sound by default and sets the Home Assistant switch to ON. The switch can be toggled at any time from the device page.
 
+### GPIO (LED bar + buttons)
+
+The GPIO controller is integrated directly in `linux-voice-assistant`.
+
+Supported hardware behavior:
+* WS2812B LED bar state rendering (`OFF`, `READY`, `MUTED`, `LISTENING`, `PLAYBACK`)
+* Mute button on `GPIO17` (`mute_toggle`)
+* Volume up/down buttons on `GPIO22`/`GPIO23` (`volume_up`, `volume_down`)
+* Local volume feedback sound via `aplay`
+
+Useful options:
+``` sh
+python3 -m linux_voice_assistant ... \
+    --gpio-feedback-device "sysdefault:CARD=wm8960soundcard"
+```
+
+To disable integrated GPIO handling:
+``` sh
+python3 -m linux_voice_assistant ... \
+    --disable-gpio-control
+```
+
+Notes:
+* External IPC sockets (`/tmp/lva-ipc/control.sock`, `/tmp/lva-ipc/gpio-events.sock`) are still available.
+* `gpiozero` and `rpi_ws281x` are optional: if unavailable, GPIO/LED features are disabled with warnings.
+
+### VL53L0X Distance Sensor
+
+The satellite exposes a **Distance** sensor to Home Assistant when a VL53L0X is connected on I2C.
+
+Behavior:
+* Read distance internally every `1s`
+* Publish sensor state to Home Assistant every `5s`
+* Unit: `mm`
+
+### Trigger Modes (Wake Word / Distance / Both)
+
+You can control how listening is triggered:
+
+``` sh
+# Wake word only (default)
+python3 -m linux_voice_assistant ... \
+    --wake-word-detection \
+    --no-distance-activation
+
+# Distance only (direct listening when close)
+python3 -m linux_voice_assistant ... \
+    --no-wake-word-detection \
+    --distance-activation \
+    --distance-activation-threshold-mm 120
+
+# Both wake word and distance trigger
+python3 -m linux_voice_assistant ... \
+    --wake-word-detection \
+    --distance-activation \
+    --distance-activation-threshold-mm 120
+```
+
 ## Wake Word
 
 Change the default wake word with `--wake-model <id>` where `<id>` is the name of a model in the `wakewords` directory. For example, `--wake-model hey_jarvis` will load `wakewords/hey_jarvis.tflite` by default.

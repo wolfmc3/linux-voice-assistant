@@ -51,6 +51,10 @@ from pyopen_wakeword import OpenWakeWord
 
 from .api_server import APIServer
 from .entity import (
+    DistanceActivationSwitchEntity,
+    DistanceActivationSoundSwitchEntity,
+    DistanceActivationThresholdNumberEntity,
+    DistanceSensorEntity,
     LedIntensityNumberEntity,
     MediaPlayerEntity,
     MuteSwitchEntity,
@@ -59,9 +63,11 @@ from .entity import (
     ShutdownButtonEntity,
     SystemVolumeNumberEntity,
     ThinkingSoundEntity,
+    WakeWordDetectionSwitchEntity,
     WakeWordThresholdNumberEntity,
     WakeWordThresholdPresetSelectEntity,
 )
+from .vl53l0x_reader import Vl53l0xReader
 from .models import (
     AvailableWakeWord,
     ServerState,
@@ -95,6 +101,13 @@ class VoiceSatelliteProtocol(APIServer):
         self._pipeline_active = False
         self._external_wake_words: Dict[str, VoiceAssistantExternalWakeWord] = {}
         self._disconnect_event = asyncio.Event()
+        self._distance_mm: Optional[float] = None
+        self._distance_reader: Optional[Vl53l0xReader] = None
+        self._distance_task: Optional[asyncio.Task[None]] = None
+        self._distance_last_publish = 0.0
+        self._distance_activation_latched = False
+        self._distance_last_trigger = 0.0
+        self._listening_trigger: Optional[str] = None
 
         existing_media_players = [
             entity
@@ -233,6 +246,56 @@ class VoiceSatelliteProtocol(APIServer):
             for extra in existing_reboot_buttons[1:]:
                 self.state.entities.remove(extra)
 
+        existing_distance_sensors = [
+            entity
+            for entity in self.state.entities
+            if isinstance(entity, DistanceSensorEntity)
+        ]
+        if existing_distance_sensors:
+            self.state.distance_sensor_entity = existing_distance_sensors[0]
+            for extra in existing_distance_sensors[1:]:
+                self.state.entities.remove(extra)
+
+        existing_wake_word_detection_switches = [
+            entity
+            for entity in self.state.entities
+            if isinstance(entity, WakeWordDetectionSwitchEntity)
+        ]
+        if existing_wake_word_detection_switches:
+            self.state.wake_word_detection_entity = existing_wake_word_detection_switches[0]
+            for extra in existing_wake_word_detection_switches[1:]:
+                self.state.entities.remove(extra)
+
+        existing_distance_activation_switches = [
+            entity
+            for entity in self.state.entities
+            if isinstance(entity, DistanceActivationSwitchEntity)
+        ]
+        if existing_distance_activation_switches:
+            self.state.distance_activation_entity = existing_distance_activation_switches[0]
+            for extra in existing_distance_activation_switches[1:]:
+                self.state.entities.remove(extra)
+
+        existing_distance_activation_threshold_numbers = [
+            entity
+            for entity in self.state.entities
+            if isinstance(entity, DistanceActivationThresholdNumberEntity)
+        ]
+        if existing_distance_activation_threshold_numbers:
+            self.state.distance_activation_threshold_entity = existing_distance_activation_threshold_numbers[0]
+            for extra in existing_distance_activation_threshold_numbers[1:]:
+                self.state.entities.remove(extra)
+
+        existing_distance_activation_sound_switches = [
+            entity
+            for entity in self.state.entities
+            if isinstance(entity, DistanceActivationSoundSwitchEntity)
+        ]
+        if existing_distance_activation_sound_switches:
+            self.state.distance_activation_sound_entity = existing_distance_activation_sound_switches[0]
+            for extra in existing_distance_activation_sound_switches[1:]:
+                self.state.entities.remove(extra)
+
         system_volume = self.state.system_volume_entity
         if system_volume is None:
             system_volume = SystemVolumeNumberEntity(
@@ -367,6 +430,103 @@ class VoiceSatelliteProtocol(APIServer):
         reboot_button.server = self
         reboot_button.update_reboot_system(self._reboot_system)
 
+        distance_sensor = self.state.distance_sensor_entity
+        if distance_sensor is None:
+            distance_sensor = DistanceSensorEntity(
+                server=self,
+                key=len(state.entities),
+                name="Distance",
+                object_id="distance",
+                get_distance_mm=self._get_distance_mm,
+            )
+            self.state.entities.append(distance_sensor)
+            self.state.distance_sensor_entity = distance_sensor
+        elif distance_sensor not in self.state.entities:
+            self.state.entities.append(distance_sensor)
+
+        distance_sensor.server = self
+        distance_sensor.update_get_distance_mm(self._get_distance_mm)
+
+        wake_word_detection_switch = self.state.wake_word_detection_entity
+        if wake_word_detection_switch is None:
+            wake_word_detection_switch = WakeWordDetectionSwitchEntity(
+                server=self,
+                key=len(state.entities),
+                name="Wake Word Detection",
+                object_id="wake_word_detection",
+                get_enabled=self._get_wake_word_detection_enabled,
+                set_enabled=self._set_wake_word_detection_enabled,
+            )
+            self.state.entities.append(wake_word_detection_switch)
+            self.state.wake_word_detection_entity = wake_word_detection_switch
+        elif wake_word_detection_switch not in self.state.entities:
+            self.state.entities.append(wake_word_detection_switch)
+
+        wake_word_detection_switch.server = self
+        wake_word_detection_switch.update_get_enabled(self._get_wake_word_detection_enabled)
+        wake_word_detection_switch.update_set_enabled(self._set_wake_word_detection_enabled)
+        wake_word_detection_switch.sync_with_state()
+
+        distance_activation_switch = self.state.distance_activation_entity
+        if distance_activation_switch is None:
+            distance_activation_switch = DistanceActivationSwitchEntity(
+                server=self,
+                key=len(state.entities),
+                name="Distance Activation",
+                object_id="distance_activation",
+                get_enabled=self._get_distance_activation_enabled,
+                set_enabled=self._set_distance_activation_enabled,
+            )
+            self.state.entities.append(distance_activation_switch)
+            self.state.distance_activation_entity = distance_activation_switch
+        elif distance_activation_switch not in self.state.entities:
+            self.state.entities.append(distance_activation_switch)
+
+        distance_activation_switch.server = self
+        distance_activation_switch.update_get_enabled(self._get_distance_activation_enabled)
+        distance_activation_switch.update_set_enabled(self._set_distance_activation_enabled)
+        distance_activation_switch.sync_with_state()
+
+        distance_activation_sound_switch = self.state.distance_activation_sound_entity
+        if distance_activation_sound_switch is None:
+            distance_activation_sound_switch = DistanceActivationSoundSwitchEntity(
+                server=self,
+                key=len(state.entities),
+                name="Distance Activation Sound",
+                object_id="distance_activation_sound",
+                get_enabled=self._get_distance_activation_sound_enabled,
+                set_enabled=self._set_distance_activation_sound_enabled,
+            )
+            self.state.entities.append(distance_activation_sound_switch)
+            self.state.distance_activation_sound_entity = distance_activation_sound_switch
+        elif distance_activation_sound_switch not in self.state.entities:
+            self.state.entities.append(distance_activation_sound_switch)
+
+        distance_activation_sound_switch.server = self
+        distance_activation_sound_switch.update_get_enabled(self._get_distance_activation_sound_enabled)
+        distance_activation_sound_switch.update_set_enabled(self._set_distance_activation_sound_enabled)
+        distance_activation_sound_switch.sync_with_state()
+
+        distance_activation_threshold_number = self.state.distance_activation_threshold_entity
+        if distance_activation_threshold_number is None:
+            distance_activation_threshold_number = DistanceActivationThresholdNumberEntity(
+                server=self,
+                key=len(state.entities),
+                name="Distance Activation Threshold",
+                object_id="distance_activation_threshold",
+                get_threshold=self._get_distance_activation_threshold_mm,
+                set_threshold=self._set_distance_activation_threshold_mm,
+            )
+            self.state.entities.append(distance_activation_threshold_number)
+            self.state.distance_activation_threshold_entity = distance_activation_threshold_number
+        elif distance_activation_threshold_number not in self.state.entities:
+            self.state.entities.append(distance_activation_threshold_number)
+
+        distance_activation_threshold_number.server = self
+        distance_activation_threshold_number.update_get_threshold(self._get_distance_activation_threshold_mm)
+        distance_activation_threshold_number.update_set_threshold(self._set_distance_activation_threshold_mm)
+        distance_activation_threshold_number.sync_with_state()
+
         # Add/update thinking sound entity
         thinking_sound_switch = self.state.thinking_sound_entity
         if thinking_sound_switch is None:
@@ -396,6 +556,7 @@ class VoiceSatelliteProtocol(APIServer):
 
         self._apply_wake_word_threshold(log_startup=True)
         self.state.satellite = self
+        self._start_distance_task()
 
         if self.state.ipc_bridge is not None:
             self.state.ipc_bridge.set_control_handler(self._handle_local_command)
@@ -412,6 +573,147 @@ class VoiceSatelliteProtocol(APIServer):
             _LOGGER.debug("Thinking sound disabled")
             pass
         self.state.save_preferences()
+
+    def _get_wake_word_detection_enabled(self) -> bool:
+        return bool(self.state.wake_word_detection_enabled)
+
+    def _set_wake_word_detection_enabled(self, enabled: bool) -> None:
+        self.state.wake_word_detection_enabled = bool(enabled)
+        self.state.preferences.wake_word_detection = 1 if self.state.wake_word_detection_enabled else 0
+        self.state.save_preferences()
+        _LOGGER.info(
+            "Wake-word detection %s",
+            "enabled" if self.state.wake_word_detection_enabled else "disabled",
+        )
+
+    def _get_distance_activation_enabled(self) -> bool:
+        return bool(self.state.distance_activation_enabled)
+
+    def _set_distance_activation_enabled(self, enabled: bool) -> None:
+        self.state.distance_activation_enabled = bool(enabled)
+        self.state.preferences.distance_activation = 1 if self.state.distance_activation_enabled else 0
+        if not self.state.distance_activation_enabled:
+            self._distance_activation_latched = False
+        self.state.save_preferences()
+        _LOGGER.info(
+            "Distance activation %s",
+            "enabled" if self.state.distance_activation_enabled else "disabled",
+        )
+
+    def _get_distance_activation_sound_enabled(self) -> bool:
+        return bool(self.state.distance_activation_sound_enabled)
+
+    def _set_distance_activation_sound_enabled(self, enabled: bool) -> None:
+        self.state.distance_activation_sound_enabled = bool(enabled)
+        self.state.preferences.distance_activation_sound = 1 if self.state.distance_activation_sound_enabled else 0
+        self.state.save_preferences()
+        _LOGGER.info(
+            "Distance activation sound %s",
+            "enabled" if self.state.distance_activation_sound_enabled else "disabled",
+        )
+
+    def _get_distance_activation_threshold_mm(self) -> float:
+        return float(self.state.distance_activation_threshold_mm)
+
+    def _set_distance_activation_threshold_mm(self, value: float) -> bool:
+        target = max(10.0, min(2000.0, float(value)))
+        self.state.distance_activation_threshold_mm = target
+        self.state.preferences.distance_activation_threshold_mm = target
+        self.state.save_preferences()
+        _LOGGER.info("Distance activation threshold set to %.1f mm", target)
+        return True
+
+    def _get_distance_mm(self) -> Optional[float]:
+        return self._distance_mm
+
+    def _publish_distance_state(self) -> None:
+        if self.state.distance_sensor_entity is None:
+            return
+        self.send_messages([self.state.distance_sensor_entity.get_state_message()])
+
+    def _start_direct_listening(self, trigger: str) -> bool:
+        if self.state.muted:
+            return False
+        if not self.state.connected:
+            return False
+        if self._is_streaming_audio:
+            return False
+
+        self.send_messages([VoiceAssistantRequest(start=True)])
+        self._is_streaming_audio = True
+        self._listening_trigger = trigger
+        self.duck()
+        if trigger == "distance" and self.state.distance_activation_sound_enabled:
+            self.state.tts_player.play(self.state.wakeup_sound)
+        self._emit_ipc_event("distance_trigger", source=trigger)
+        _LOGGER.info("Direct listening started (trigger=%s)", trigger)
+        return True
+
+    def _stop_distance_listening(self) -> None:
+        if not self._is_streaming_audio:
+            return
+        if self._listening_trigger != "distance":
+            return
+
+        self.send_messages([VoiceAssistantRequest(start=False)])
+        self._is_streaming_audio = False
+        self._listening_trigger = None
+        self._emit_ipc_event("distance_trigger_cancelled", reason="out_of_range")
+        _LOGGER.info("Direct listening cancelled (trigger=distance, reason=out_of_range)")
+
+    def _handle_distance_activation(self, now: float) -> None:
+        if not self.state.distance_activation_enabled:
+            self._stop_distance_listening()
+            self._distance_activation_latched = False
+            return
+
+        distance = self._distance_mm
+        threshold = max(1.0, float(self.state.distance_activation_threshold_mm))
+
+        if (distance is None) or (distance > threshold):
+            self._stop_distance_listening()
+            self._distance_activation_latched = False
+            return
+
+        if self._distance_activation_latched:
+            return
+
+        if (now - self._distance_last_trigger) < self.state.refractory_seconds:
+            return
+
+        if self._start_direct_listening("distance"):
+            self._distance_last_trigger = now
+            self._distance_activation_latched = True
+
+    def _start_distance_task(self) -> None:
+        if self._distance_task is not None:
+            return
+
+        if self.state.vl53l0x_reader is None:
+            self.state.vl53l0x_reader = Vl53l0xReader()
+        self._distance_reader = self.state.vl53l0x_reader
+        self._distance_task = asyncio.create_task(self._distance_loop())
+
+    async def _distance_loop(self) -> None:
+        while True:
+            try:
+                now = time.monotonic()
+                if self._distance_reader is not None:
+                    self._distance_mm = self._distance_reader.read_distance_mm()
+                else:
+                    self._distance_mm = None
+
+                self._handle_distance_activation(now)
+
+                if (now - self._distance_last_publish) >= 5.0:
+                    self._publish_distance_state()
+                    self._distance_last_publish = now
+                await asyncio.sleep(1.0)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Distance task failed")
+                await asyncio.sleep(1.0)
 
     def _get_led_night_mode(self) -> bool:
         return bool(int(getattr(self.state.preferences, "led_night_mode", 0)))
@@ -732,6 +1034,7 @@ class VoiceSatelliteProtocol(APIServer):
         ):
             self._emit_ipc_event("listening_end")
             self._is_streaming_audio = False
+            self._listening_trigger = None
         elif event_type in (
             VoiceAssistantEventType.VOICE_ASSISTANT_STT_START,
             VoiceAssistantEventType.VOICE_ASSISTANT_STT_VAD_START,
@@ -756,6 +1059,7 @@ class VoiceSatelliteProtocol(APIServer):
         elif event_type == VoiceAssistantEventType.VOICE_ASSISTANT_RUN_END:
             self._emit_ipc_event("run_end")
             self._is_streaming_audio = False
+            self._listening_trigger = None
             if not self._tts_played:
                 self._tts_finished()
 
@@ -927,6 +1231,9 @@ class VoiceSatelliteProtocol(APIServer):
         self.send_messages([VoiceAssistantAudio(data=audio_chunk)])
 
     def wakeup(self, wake_word: Union[MicroWakeWord, OpenWakeWord]) -> None:
+        if not self.state.wake_word_detection_enabled:
+            return
+
         if self._timer_finished:
             # Stop timer instead
             self._timer_finished = False
@@ -946,6 +1253,7 @@ class VoiceSatelliteProtocol(APIServer):
         )
         self.duck()
         self._is_streaming_audio = True
+        self._listening_trigger = "wake_word"
         self.state.tts_player.play(self.state.wakeup_sound)
 
     def stop(self) -> None:
@@ -1008,10 +1316,12 @@ class VoiceSatelliteProtocol(APIServer):
 
         self._disconnect_event.set()
         self._is_streaming_audio = False
+        self._listening_trigger = None
         self._tts_url = None
         self._tts_played = False
         self._continue_conversation = False
         self._timer_finished = False
+        self._distance_activation_latched = False
 
         # Stop any ongoing audio playback and wake/stop word processing.
         try:
@@ -1028,6 +1338,10 @@ class VoiceSatelliteProtocol(APIServer):
         self.state.connected = False
         if self.state.satellite is self:
             self.state.satellite = None
+
+        if self._distance_task is not None:
+            self._distance_task.cancel()
+            self._distance_task = None
 
         if self.state.mute_switch_entity is not None:
             self.state.mute_switch_entity.sync_with_state()

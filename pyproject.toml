@@ -32,6 +32,8 @@ dependencies = [
     "pyopen-wakeword>=1,<2",
     "python-mpv>=1,<2",
     "zeroconf<1",
+    "adafruit-blinka>=8,<9",
+    "adafruit-circuitpython-vl53l0x>=3,<4",
 ]
 
 [project.optional-dependencies]

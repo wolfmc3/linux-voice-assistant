@@ -9,12 +9,14 @@ from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]
     ListEntitiesMediaPlayerResponse,
     ListEntitiesNumberResponse,
     ListEntitiesRequest,
+    ListEntitiesSensorResponse,
     ListEntitiesSwitchResponse,
     ListEntitiesButtonResponse,
     ListEntitiesSelectResponse,
     NumberCommandRequest,
     NumberMode,
     NumberStateResponse,
+    SensorStateResponse,
     SelectCommandRequest,
     SelectStateResponse,
     SwitchCommandRequest,
@@ -27,6 +29,7 @@ from aioesphomeapi.model import (
     MediaPlayerCommand,
     MediaPlayerEntityFeature,
     MediaPlayerState,
+    SensorStateClass,
     EntityCategory,
 )
 from google.protobuf import message
@@ -338,6 +341,144 @@ class NightModeSwitchEntity(ESPHomeEntity):
             yield SwitchStateResponse(key=self.key, state=self._switch_state)
 
 
+class WakeWordDetectionSwitchEntity(ESPHomeEntity):
+    def __init__(
+        self,
+        server: APIServer,
+        key: int,
+        name: str,
+        object_id: str,
+        get_enabled: Callable[[], bool],
+        set_enabled: Callable[[bool], None],
+    ) -> None:
+        ESPHomeEntity.__init__(self, server)
+        self.key = key
+        self.name = name
+        self.object_id = object_id
+        self._get_enabled = get_enabled
+        self._set_enabled = set_enabled
+        self._switch_state = self._get_enabled()
+
+    def update_get_enabled(self, get_enabled: Callable[[], bool]) -> None:
+        self._get_enabled = get_enabled
+
+    def update_set_enabled(self, set_enabled: Callable[[bool], None]) -> None:
+        self._set_enabled = set_enabled
+
+    def sync_with_state(self) -> None:
+        self._switch_state = self._get_enabled()
+
+    def handle_message(self, msg: message.Message) -> Iterable[message.Message]:
+        if isinstance(msg, SwitchCommandRequest) and (msg.key == self.key):
+            new_state = bool(msg.state)
+            self._switch_state = new_state
+            self._set_enabled(new_state)
+            yield SwitchStateResponse(key=self.key, state=self._switch_state)
+        elif isinstance(msg, ListEntitiesRequest):
+            yield ListEntitiesSwitchResponse(
+                object_id=self.object_id,
+                key=self.key,
+                name=self.name,
+                entity_category=EntityCategory.CONFIG,
+                icon="mdi:account-voice",
+            )
+        elif isinstance(msg, SubscribeHomeAssistantStatesRequest):
+            self.sync_with_state()
+            yield SwitchStateResponse(key=self.key, state=self._switch_state)
+
+
+class DistanceActivationSwitchEntity(ESPHomeEntity):
+    def __init__(
+        self,
+        server: APIServer,
+        key: int,
+        name: str,
+        object_id: str,
+        get_enabled: Callable[[], bool],
+        set_enabled: Callable[[bool], None],
+    ) -> None:
+        ESPHomeEntity.__init__(self, server)
+        self.key = key
+        self.name = name
+        self.object_id = object_id
+        self._get_enabled = get_enabled
+        self._set_enabled = set_enabled
+        self._switch_state = self._get_enabled()
+
+    def update_get_enabled(self, get_enabled: Callable[[], bool]) -> None:
+        self._get_enabled = get_enabled
+
+    def update_set_enabled(self, set_enabled: Callable[[bool], None]) -> None:
+        self._set_enabled = set_enabled
+
+    def sync_with_state(self) -> None:
+        self._switch_state = self._get_enabled()
+
+    def handle_message(self, msg: message.Message) -> Iterable[message.Message]:
+        if isinstance(msg, SwitchCommandRequest) and (msg.key == self.key):
+            new_state = bool(msg.state)
+            self._switch_state = new_state
+            self._set_enabled(new_state)
+            yield SwitchStateResponse(key=self.key, state=self._switch_state)
+        elif isinstance(msg, ListEntitiesRequest):
+            yield ListEntitiesSwitchResponse(
+                object_id=self.object_id,
+                key=self.key,
+                name=self.name,
+                entity_category=EntityCategory.CONFIG,
+                icon="mdi:motion-sensor",
+            )
+        elif isinstance(msg, SubscribeHomeAssistantStatesRequest):
+            self.sync_with_state()
+            yield SwitchStateResponse(key=self.key, state=self._switch_state)
+
+
+class DistanceActivationSoundSwitchEntity(ESPHomeEntity):
+    def __init__(
+        self,
+        server: APIServer,
+        key: int,
+        name: str,
+        object_id: str,
+        get_enabled: Callable[[], bool],
+        set_enabled: Callable[[bool], None],
+    ) -> None:
+        ESPHomeEntity.__init__(self, server)
+        self.key = key
+        self.name = name
+        self.object_id = object_id
+        self._get_enabled = get_enabled
+        self._set_enabled = set_enabled
+        self._switch_state = self._get_enabled()
+
+    def update_get_enabled(self, get_enabled: Callable[[], bool]) -> None:
+        self._get_enabled = get_enabled
+
+    def update_set_enabled(self, set_enabled: Callable[[bool], None]) -> None:
+        self._set_enabled = set_enabled
+
+    def sync_with_state(self) -> None:
+        self._switch_state = self._get_enabled()
+
+    def handle_message(self, msg: message.Message) -> Iterable[message.Message]:
+        if isinstance(msg, SwitchCommandRequest) and (msg.key == self.key):
+            new_state = bool(msg.state)
+            self._switch_state = new_state
+            self._set_enabled(new_state)
+            yield SwitchStateResponse(key=self.key, state=self._switch_state)
+        elif isinstance(msg, ListEntitiesRequest):
+            yield ListEntitiesSwitchResponse(
+                object_id=self.object_id,
+                key=self.key,
+                name=self.name,
+                entity_category=EntityCategory.CONFIG,
+                icon="mdi:volume-high",
+            )
+        elif isinstance(msg, SubscribeHomeAssistantStatesRequest):
+            self.sync_with_state()
+            yield SwitchStateResponse(key=self.key, state=self._switch_state)
+
+
 class SystemVolumeNumberEntity(ESPHomeEntity):
     def __init__(
         self,
@@ -454,6 +595,101 @@ class LedIntensityNumberEntity(ESPHomeEntity):
             )
         elif isinstance(msg, SubscribeHomeAssistantStatesRequest):
             self.sync_with_state()
+            yield self.get_state_message()
+
+
+class DistanceActivationThresholdNumberEntity(ESPHomeEntity):
+    def __init__(
+        self,
+        server: APIServer,
+        key: int,
+        name: str,
+        object_id: str,
+        get_threshold: Callable[[], float],
+        set_threshold: Callable[[float], bool],
+    ) -> None:
+        ESPHomeEntity.__init__(self, server)
+        self.key = key
+        self.name = name
+        self.object_id = object_id
+        self._get_threshold = get_threshold
+        self._set_threshold = set_threshold
+        self._state = max(10.0, min(2000.0, self._get_threshold()))
+
+    def update_get_threshold(self, get_threshold: Callable[[], float]) -> None:
+        self._get_threshold = get_threshold
+
+    def update_set_threshold(self, set_threshold: Callable[[float], bool]) -> None:
+        self._set_threshold = set_threshold
+
+    def sync_with_state(self) -> None:
+        self._state = max(10.0, min(2000.0, self._get_threshold()))
+
+    def get_state_message(self) -> NumberStateResponse:
+        return NumberStateResponse(key=self.key, state=self._state)
+
+    def handle_message(self, msg: message.Message) -> Iterable[message.Message]:
+        if isinstance(msg, NumberCommandRequest) and (msg.key == self.key):
+            self._set_threshold(msg.state)
+            self.sync_with_state()
+            yield self.get_state_message()
+        elif isinstance(msg, ListEntitiesRequest):
+            yield ListEntitiesNumberResponse(
+                object_id=self.object_id,
+                key=self.key,
+                name=self.name,
+                icon="mdi:ruler",
+                min_value=10.0,
+                max_value=2000.0,
+                step=1.0,
+                mode=NumberMode.NUMBER_MODE_SLIDER,
+                unit_of_measurement="mm",
+                entity_category=EntityCategory.CONFIG,
+            )
+        elif isinstance(msg, SubscribeHomeAssistantStatesRequest):
+            self.sync_with_state()
+            yield self.get_state_message()
+
+
+class DistanceSensorEntity(ESPHomeEntity):
+    def __init__(
+        self,
+        server: APIServer,
+        key: int,
+        name: str,
+        object_id: str,
+        get_distance_mm: Callable[[], Optional[float]],
+    ) -> None:
+        ESPHomeEntity.__init__(self, server)
+        self.key = key
+        self.name = name
+        self.object_id = object_id
+        self._get_distance_mm = get_distance_mm
+
+    def update_get_distance_mm(self, get_distance_mm: Callable[[], Optional[float]]) -> None:
+        self._get_distance_mm = get_distance_mm
+
+    def get_state_message(self) -> SensorStateResponse:
+        value = self._get_distance_mm()
+        if value is None:
+            return SensorStateResponse(key=self.key, missing_state=True)
+        return SensorStateResponse(key=self.key, state=float(value), missing_state=False)
+
+    def handle_message(self, msg: message.Message) -> Iterable[message.Message]:
+        if isinstance(msg, ListEntitiesRequest):
+            yield ListEntitiesSensorResponse(
+                object_id=self.object_id,
+                key=self.key,
+                name=self.name,
+                icon="mdi:ruler",
+                unit_of_measurement="mm",
+                accuracy_decimals=0,
+                force_update=False,
+                device_class="distance",
+                state_class=SensorStateClass.MEASUREMENT,
+                entity_category=EntityCategory.DIAGNOSTIC,
+            )
+        elif isinstance(msg, SubscribeHomeAssistantStatesRequest):
             yield self.get_state_message()
 
 

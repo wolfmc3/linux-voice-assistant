@@ -16,6 +16,7 @@ import soundcard as sc
 from pymicro_wakeword import MicroWakeWord, MicroWakeWordFeatures
 from pyopen_wakeword import OpenWakeWord, OpenWakeWordFeatures
 
+from .gpio_controller import LvaGpioController
 from .local_ipc import LocalIpcBridge
 from .models import AvailableWakeWord, Preferences, ServerState, WakeWordType
 from .mpv_player import MpvMediaPlayer
@@ -76,6 +77,24 @@ async def main() -> None:
     parser.add_argument(
         "--wake-model", default="okay_nabu", help="Id of active wake model"
     )
+    parser.add_argument(
+        "--wake-word-detection",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable/disable wake-word trigger detection",
+    )
+    parser.add_argument(
+        "--distance-activation",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable/disable direct listening trigger based on distance sensor",
+    )
+    parser.add_argument(
+        "--distance-activation-threshold-mm",
+        type=float,
+        default=None,
+        help="Distance threshold in mm for direct listening trigger (used when --distance-activation is enabled)",
+    )
     parser.add_argument("--stop-model", default="stop", help="Id of stop model")
     parser.add_argument(
         "--download-dir",
@@ -120,7 +139,17 @@ async def main() -> None:
     )
     parser.add_argument(
         "--enable-thinking-sound", action="store_true", help="Enable thinking sound on startup"
-    )    
+    )
+    parser.add_argument(
+        "--disable-gpio-control",
+        action="store_true",
+        help="Disable integrated GPIO controller (LED bar + hardware buttons)",
+    )
+    parser.add_argument(
+        "--gpio-feedback-device",
+        default="sysdefault:CARD=wm8960soundcard",
+        help="ALSA device used for GPIO button volume feedback sound (aplay -D)",
+    )
     parser.add_argument(
         "--debug", action="store_true", help="Print DEBUG messages to console"
     )
@@ -273,6 +302,37 @@ async def main() -> None:
         download_dir=args.download_dir,
         ipc_bridge=LocalIpcBridge(),
     )
+    pref_wake_word_detection = bool(int(getattr(preferences, "wake_word_detection", 1)))
+    pref_distance_activation = bool(int(getattr(preferences, "distance_activation", 0)))
+    pref_distance_activation_sound = bool(int(getattr(preferences, "distance_activation_sound", 1)))
+    pref_distance_threshold = max(
+        10.0,
+        min(2000.0, float(getattr(preferences, "distance_activation_threshold_mm", 120.0))),
+    )
+
+    state.wake_word_detection_enabled = (
+        pref_wake_word_detection if (args.wake_word_detection is None) else bool(args.wake_word_detection)
+    )
+    state.distance_activation_enabled = (
+        pref_distance_activation if (args.distance_activation is None) else bool(args.distance_activation)
+    )
+    state.distance_activation_sound_enabled = pref_distance_activation_sound
+    state.distance_activation_threshold_mm = (
+        pref_distance_threshold
+        if (args.distance_activation_threshold_mm is None)
+        else max(10.0, min(2000.0, float(args.distance_activation_threshold_mm)))
+    )
+    state.preferences.wake_word_detection = 1 if state.wake_word_detection_enabled else 0
+    state.preferences.distance_activation = 1 if state.distance_activation_enabled else 0
+    state.preferences.distance_activation_sound = 1 if state.distance_activation_sound_enabled else 0
+    state.preferences.distance_activation_threshold_mm = state.distance_activation_threshold_mm
+    _LOGGER.info(
+        "Trigger config: wake_word=%s distance=%s distance_sound=%s threshold_mm=%.1f",
+        "on" if state.wake_word_detection_enabled else "off",
+        "on" if state.distance_activation_enabled else "off",
+        "on" if state.distance_activation_sound_enabled else "off",
+        state.distance_activation_threshold_mm,
+    )
 
     if args.enable_thinking_sound:
         state.save_preferences() 
@@ -287,6 +347,22 @@ async def main() -> None:
     loop = asyncio.get_running_loop()
     if state.ipc_bridge is not None:
         await state.ipc_bridge.start()
+
+    if not args.disable_gpio_control:
+        try:
+            state.gpio_controller = LvaGpioController(
+                ipc_bridge=state.ipc_bridge,
+                preferences_path=preferences_path,
+                feedback_sound_path=Path(args.processing_sound),
+                feedback_sound_device=args.gpio_feedback_device,
+            )
+            await state.gpio_controller.start()
+            _LOGGER.info("Integrated GPIO controller started")
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Failed to start integrated GPIO controller")
+            state.gpio_controller = None
+    else:
+        _LOGGER.info("Integrated GPIO controller disabled by CLI flag")
 
     server = await loop.create_server(
         lambda: VoiceSatelliteProtocol(state), host=args.host, port=args.port
@@ -305,6 +381,9 @@ async def main() -> None:
     finally:
         state.audio_queue.put_nowait(None)
         process_audio_thread.join()
+        if state.gpio_controller is not None:
+            await state.gpio_controller.shutdown()
+            state.gpio_controller = None
         if state.ipc_bridge is not None:
             state.ipc_bridge.stop()
 
@@ -377,6 +456,8 @@ def process_audio(state: ServerState, mic, block_size: int):
                         oww_inputs.extend(oww_features.process_streaming(audio_chunk))
 
                     for wake_word in wake_words:
+                        if not state.wake_word_detection_enabled:
+                            continue
                         activated = False
                         score: Optional[float] = None
                         threshold: float

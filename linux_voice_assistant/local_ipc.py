@@ -37,12 +37,14 @@ class LocalIpcBridge:
 
     - Receives commands on CONTROL_SOCKET_PATH.
     - Sends events to GPIO_EVENT_SOCKET_PATH.
+    - Supports in-process event listeners.
     """
 
     def __init__(self) -> None:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._transport: Optional[asyncio.transports.DatagramTransport] = None
         self._control_handler: Optional[Callable[[str], None]] = None
+        self._event_listeners: set[Callable[[dict[str, object]], None]] = set()
         self._event_socket = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
         self._event_socket.setblocking(False)
 
@@ -91,6 +93,12 @@ class LocalIpcBridge:
     def set_control_handler(self, handler: Optional[Callable[[str], None]]) -> None:
         self._control_handler = handler
 
+    def add_event_listener(self, listener: Callable[[dict[str, object]], None]) -> None:
+        self._event_listeners.add(listener)
+
+    def remove_event_listener(self, listener: Callable[[dict[str, object]], None]) -> None:
+        self._event_listeners.discard(listener)
+
     def handle_command(self, cmd: str) -> None:
         if self._control_handler is None:
             return
@@ -102,6 +110,11 @@ class LocalIpcBridge:
     def emit_event(self, event: str, **data: object) -> None:
         payload = {"event": event, **data}
         message = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        for listener in tuple(self._event_listeners):
+            try:
+                listener(payload)
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("IPC in-process event listener failed (event=%s)", event)
         try:
             self._event_socket.sendto(message, str(GPIO_EVENT_SOCKET_PATH))
         except FileNotFoundError:

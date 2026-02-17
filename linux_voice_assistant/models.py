@@ -12,8 +12,14 @@ if TYPE_CHECKING:
     from pymicro_wakeword import MicroWakeWord
     from pyopen_wakeword import OpenWakeWord
 
+    from .gpio_controller import LvaGpioController
     from .local_ipc import LocalIpcBridge
+    from .vl53l0x_reader import Vl53l0xReader
     from .entity import (
+        DistanceSensorEntity,
+        DistanceActivationSwitchEntity,
+        DistanceActivationSoundSwitchEntity,
+        DistanceActivationThresholdNumberEntity,
         ESPHomeEntity,
         LedIntensityNumberEntity,
         MediaPlayerEntity,
@@ -23,6 +29,7 @@ if TYPE_CHECKING:
         ShutdownButtonEntity,
         SystemVolumeNumberEntity,
         ThinkingSoundEntity,
+        WakeWordDetectionSwitchEntity,
         WakeWordThresholdNumberEntity,
         WakeWordThresholdPresetSelectEntity,
     )
@@ -119,6 +126,10 @@ class Preferences:
     thinking_sound: int = 0  # 0 = disabled, 1 = enabled
     led_intensity: int = 100  # 0..100%
     led_night_mode: int = 0  # 0 = disabled, 1 = enabled
+    wake_word_detection: int = 1  # 0 = disabled, 1 = enabled
+    distance_activation: int = 0  # 0 = disabled, 1 = enabled
+    distance_activation_sound: int = 1  # 0 = disabled, 1 = enabled
+    distance_activation_threshold_mm: float = 120.0
     wake_word_threshold_preset: str = WAKE_WORD_THRESHOLD_PRESET_MODEL_DEFAULT
     wake_word_threshold_custom: float = WAKE_WORD_THRESHOLD_DEFAULT_CUSTOM
 
@@ -156,12 +167,23 @@ class ServerState:
     night_mode_entity: "Optional[NightModeSwitchEntity]" = None
     wake_word_threshold_select_entity: "Optional[WakeWordThresholdPresetSelectEntity]" = None
     wake_word_threshold_number_entity: "Optional[WakeWordThresholdNumberEntity]" = None
+    distance_sensor_entity: "Optional[DistanceSensorEntity]" = None
+    wake_word_detection_entity: "Optional[WakeWordDetectionSwitchEntity]" = None
+    distance_activation_entity: "Optional[DistanceActivationSwitchEntity]" = None
+    distance_activation_sound_entity: "Optional[DistanceActivationSoundSwitchEntity]" = None
+    distance_activation_threshold_entity: "Optional[DistanceActivationThresholdNumberEntity]" = None
     wake_words_changed: bool = False
     refractory_seconds: float = 2.0
     thinking_sound_enabled: bool = False
     muted: bool = False
     connected: bool = False
     ipc_bridge: "Optional[LocalIpcBridge]" = None
+    gpio_controller: "Optional[LvaGpioController]" = None
+    vl53l0x_reader: "Optional[Vl53l0xReader]" = None
+    wake_word_detection_enabled: bool = True
+    distance_activation_enabled: bool = False
+    distance_activation_sound_enabled: bool = True
+    distance_activation_threshold_mm: float = 120.0
     wake_word_threshold: Optional[float] = None
     wake_word_default_thresholds: Dict[str, float] = field(default_factory=dict)
     
