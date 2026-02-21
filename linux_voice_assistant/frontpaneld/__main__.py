@@ -3,12 +3,12 @@
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import logging
 import time
 from dataclasses import dataclass
 
+from ..config import load_config
 from ..local_ipc import CONTROL_SOCKET_PATH, send_ipc_message
 
 _LOGGER = logging.getLogger(__name__)
@@ -151,22 +151,15 @@ class FrontPanelDaemon:
 
 
 async def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--mute-pin", type=int, default=17)
-    parser.add_argument("--vol-up-pin", type=int, default=22)
-    parser.add_argument("--vol-down-pin", type=int, default=23)
-    parser.add_argument("--enc-a-pin", type=int, default=5)
-    parser.add_argument("--enc-b-pin", type=int, default=6)
-    parser.add_argument("--debug", action="store_true")
-    args = parser.parse_args()
-
-    logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO)
+    config = load_config().frontpaneld
+    log_level_name = str(config.log_level).strip().upper()
+    logging.basicConfig(level=getattr(logging, log_level_name, logging.INFO))
     daemon = FrontPanelDaemon(
-        mute_pin=args.mute_pin,
-        vol_up_pin=args.vol_up_pin,
-        vol_down_pin=args.vol_down_pin,
-        enc_a_pin=args.enc_a_pin,
-        enc_b_pin=args.enc_b_pin,
+        mute_pin=config.mute_pin,
+        vol_up_pin=config.vol_up_pin,
+        vol_down_pin=config.vol_down_pin,
+        enc_a_pin=config.enc_a_pin,
+        enc_b_pin=config.enc_b_pin,
     )
     try:
         await daemon.run()

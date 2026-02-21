@@ -11,6 +11,7 @@ ExecStart=/home/user/linux-voice-assistant/.venv/bin/python -m linux_voice_assis
 Restart=always
 RestartSec=2
 Environment=PYTHONUNBUFFERED=1
+Environment=LVA_CONFIG_PATH=/home/user/linux-voice-assistant/config.json
 
 [Install]
 WantedBy=multi-user.target

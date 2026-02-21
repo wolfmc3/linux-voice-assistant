@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-import argparse
 import asyncio
 import json
 import logging
@@ -16,6 +15,7 @@ import soundcard as sc
 from pymicro_wakeword import MicroWakeWord, MicroWakeWordFeatures
 from pyopen_wakeword import OpenWakeWord, OpenWakeWordFeatures
 
+from .config import load_config, resolve_repo_path
 from .gpio_controller import LvaGpioController
 from .local_ipc import LocalIpcBridge
 from .models import AvailableWakeWord, Preferences, ServerState, WakeWordType
@@ -25,224 +25,46 @@ from .util import get_mac
 from .zeroconf import HomeAssistantZeroconf
 
 _LOGGER = logging.getLogger(__name__)
-_MODULE_DIR = Path(__file__).parent
-_REPO_DIR = _MODULE_DIR.parent
-_WAKEWORDS_DIR = _REPO_DIR / "wakewords"
-_SOUNDS_DIR = _REPO_DIR / "sounds"
-
-
-# -----------------------------------------------------------------------------
-
-
 async def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--name", required=True)
-    parser.add_argument(
-        "--audio-input-device",
-        help="soundcard name for input device (see --list-input-devices)",
-    )
-    parser.add_argument(
-        "--list-input-devices",
-        action="store_true",
-        help="List audio input devices and exit",
-    )
-    parser.add_argument("--audio-input-block-size", type=int, default=1024)
-    parser.add_argument(
-        "--audio-output-device",
-        help="mpv name for output device (see --list-output-devices)",
-    )
-    parser.add_argument(
-        "--system-volume-device",
-        help=(
-            "ALSA device for amixer (e.g. sysdefault:CARD=wm8960soundcard). "
-            "Defaults to --audio-output-device without 'alsa/' prefix."
-        ),
-    )
-    parser.add_argument(
-        "--system-volume-control",
-        default="Speaker",
-        help="ALSA mixer control name to expose as speaker volume slider (default: Speaker)",
-    )
-    parser.add_argument(
-        "--list-output-devices",
-        action="store_true",
-        help="List audio output devices and exit",
-    )
-    parser.add_argument(
-        "--wake-word-dir",
-        default=[_WAKEWORDS_DIR],
-        action="append",
-        help="Directory with wake word models (.tflite) and configs (.json)",
-    )
-    parser.add_argument(
-        "--wake-model", default="okay_nabu", help="Id of active wake model"
-    )
-    parser.add_argument(
-        "--wake-word-detection",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Enable/disable wake-word trigger detection",
-    )
-    parser.add_argument(
-        "--distance-activation",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Enable/disable direct listening trigger based on distance sensor",
-    )
-    parser.add_argument(
-        "--distance-activation-threshold-mm",
-        type=float,
-        default=None,
-        help="Distance threshold in mm for direct listening trigger (used when --distance-activation is enabled)",
-    )
-    parser.add_argument(
-        "--distance-sensor-model",
-        choices=("l0x", "l1x"),
-        default=None,
-        help="Distance sensor model to use (l0x or l1x)",
-    )
-    parser.add_argument(
-        "--vision-enabled",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Enable/disable vision-based attention checks",
-    )
-    parser.add_argument(
-        "--attention-required",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Require FACE_TOWARD before distance-triggered listening",
-    )
-    parser.add_argument(
-        "--vision-cooldown-s",
-        type=float,
-        default=None,
-        help="Cooldown between vision glance requests",
-    )
-    parser.add_argument(
-        "--vision-min-confidence",
-        type=float,
-        default=None,
-        help="Minimum confidence for FACE_TOWARD to be accepted",
-    )
-    parser.add_argument(
-        "--engaged-vad-window-s",
-        type=float,
-        default=None,
-        help="VAD start deadline after distance/attention trigger",
-    )
-    parser.add_argument("--stop-model", default="stop", help="Id of stop model")
-    parser.add_argument(
-        "--download-dir",
-        default=_REPO_DIR / "local",
-        help="Directory to download custom wake word models, etc.",
-    )
-    parser.add_argument(
-        "--refractory-seconds",
-        default=2.0,
-        type=float,
-        help="Seconds before wake word can be activated again",
-    )
-    #
-    parser.add_argument(
-        "--wakeup-sound", default=str(_SOUNDS_DIR / "wake_word_triggered.flac")
-    )
-    parser.add_argument(
-        "--timer-finished-sound", default=str(_SOUNDS_DIR / "timer_finished.flac")
-    )
-    parser.add_argument(
-        "--processing-sound", default=str(_SOUNDS_DIR / "processing.wav"),
-        help="Short sound to play while assistant is processing (thinking)"
-    )
-    parser.add_argument(
-        "--mute-sound", default=str(_SOUNDS_DIR / "mute_switch_on.flac"),
-        help="Sound to play when muting the assistant"
-    )
-    parser.add_argument(
-        "--unmute-sound", default=str(_SOUNDS_DIR / "mute_switch_off.flac"),
-        help="Sound to play when unmuting the assistant"
-    )     
-    #
-    parser.add_argument("--preferences-file", default=_REPO_DIR / "preferences.json")
-    #
-    parser.add_argument(
-        "--host",
-        default="0.0.0.0",
-        help="Address for ESPHome server (default: 0.0.0.0)",
-    )
-    parser.add_argument(
-        "--port", type=int, default=6053, help="Port for ESPHome server (default: 6053)"
-    )
-    parser.add_argument(
-        "--enable-thinking-sound", action="store_true", help="Enable thinking sound on startup"
-    )
-    parser.add_argument(
-        "--disable-gpio-control",
-        action="store_true",
-        help="Disable integrated GPIO controller (LED bar + hardware buttons)",
-    )
-    parser.add_argument(
-        "--gpio-feedback-device",
-        default="sysdefault:CARD=wm8960soundcard",
-        help="ALSA device used for GPIO button volume feedback sound (aplay -D)",
-    )
-    parser.add_argument(
-        "--debug", action="store_true", help="Print DEBUG messages to console"
-    )
-    args = parser.parse_args()
+    app_config = load_config()
+    core_config = app_config.core
 
-    if args.list_input_devices:
-        print("Input devices")
-        print("=" * 13)
-        for idx, mic in enumerate(sc.all_microphones()):
-            print(f"[{idx}]", mic.name)
-        return
+    log_level_name = str(core_config.log_level).strip().upper()
+    log_level = getattr(logging, log_level_name, logging.INFO)
+    logging.basicConfig(level=log_level)
 
-    if args.list_output_devices:
-        from mpv import MPV
+    download_dir = resolve_repo_path(core_config.download_dir)
+    download_dir.mkdir(parents=True, exist_ok=True)
 
-        player = MPV()
-        print("Output devices")
-        print("=" * 14)
-
-        for speaker in player.audio_device_list:  # type: ignore
-            print(speaker["name"] + ":", speaker["description"])
-        return
-
-    logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO)
-    _LOGGER.debug(args)
-
-    args.download_dir = Path(args.download_dir)
-    args.download_dir.mkdir(parents=True, exist_ok=True)
-
-    system_volume_device = args.system_volume_device
+    system_volume_device = core_config.system_volume_device
     if (
         system_volume_device is None
-        and args.audio_output_device
-        and args.audio_output_device.startswith("alsa/")
+        and core_config.audio_output_device
+        and core_config.audio_output_device.startswith("alsa/")
     ):
-        system_volume_device = args.audio_output_device.split("/", 1)[1]
+        system_volume_device = core_config.audio_output_device.split("/", 1)[1]
 
     # Resolve microphone
-    if args.audio_input_device is not None:
+    audio_input_device = core_config.audio_input_device
+    if audio_input_device is not None:
         try:
-            args.audio_input_device = int(args.audio_input_device)
+            audio_input_device = int(audio_input_device)
         except ValueError:
             pass
 
-        mic = sc.get_microphone(args.audio_input_device)
+        mic = sc.get_microphone(audio_input_device)
     else:
         mic = sc.default_microphone()
 
     # Load available wake words
-    wake_word_dirs = [Path(ww_dir) for ww_dir in args.wake_word_dir]
-    wake_word_dirs.append(args.download_dir / "external_wake_words")
+    wake_word_dirs = [resolve_repo_path(ww_dir) for ww_dir in core_config.wake_word_dirs]
+    wake_word_dirs.append(download_dir / "external_wake_words")
     available_wake_words: Dict[str, AvailableWakeWord] = {}
 
     for wake_word_dir in wake_word_dirs:
         for model_config_path in wake_word_dir.glob("*.json"):
             model_id = model_config_path.stem
-            if model_id == args.stop_model:
+            if model_id == core_config.stop_model:
                 # Don't show stop model as an available wake word
                 continue
 
@@ -265,7 +87,7 @@ async def main() -> None:
     _LOGGER.debug("Available wake words: %s", list(sorted(available_wake_words.keys())))
 
     # Load preferences
-    preferences_path = Path(args.preferences_file)
+    preferences_path = resolve_repo_path(core_config.preferences_file)
     if preferences_path.exists():
         _LOGGER.debug("Loading preferences: %s", preferences_path)
         with open(preferences_path, "r", encoding="utf-8") as preferences_file:
@@ -274,7 +96,7 @@ async def main() -> None:
     else:
         preferences = Preferences()
 
-    if args.enable_thinking_sound:
+    if core_config.enable_thinking_sound:
         preferences.thinking_sound = 1
 
     # Load wake/stop models
@@ -294,7 +116,7 @@ async def main() -> None:
 
     if not wake_models:
         # Load default model
-        wake_word_id = args.wake_model
+        wake_word_id = core_config.wake_model
         wake_word = available_wake_words[wake_word_id]
 
         _LOGGER.debug("Loading wake model: %s", wake_word_id)
@@ -304,7 +126,7 @@ async def main() -> None:
     # TODO: allow openWakeWord for "stop"
     stop_model: Optional[MicroWakeWord] = None
     for wake_word_dir in wake_word_dirs:
-        stop_config_path = wake_word_dir / f"{args.stop_model}.json"
+        stop_config_path = wake_word_dir / f"{core_config.stop_model}.json"
         if not stop_config_path.exists():
             continue
 
@@ -315,7 +137,7 @@ async def main() -> None:
     assert stop_model is not None
 
     state = ServerState(
-        name=args.name,
+        name=core_config.name,
         mac_address=get_mac(),
         audio_queue=Queue(),
         entities=[],
@@ -323,19 +145,19 @@ async def main() -> None:
         wake_words=wake_models,
         active_wake_words=active_wake_words,
         stop_word=stop_model,
-        music_player=MpvMediaPlayer(device=args.audio_output_device),
-        tts_player=MpvMediaPlayer(device=args.audio_output_device),
-        wakeup_sound=args.wakeup_sound,
-        timer_finished_sound=args.timer_finished_sound,
-        processing_sound=args.processing_sound,
-        mute_sound=args.mute_sound,
-        unmute_sound=args.unmute_sound,
+        music_player=MpvMediaPlayer(device=core_config.audio_output_device),
+        tts_player=MpvMediaPlayer(device=core_config.audio_output_device),
+        wakeup_sound=str(resolve_repo_path(core_config.wakeup_sound)),
+        timer_finished_sound=str(resolve_repo_path(core_config.timer_finished_sound)),
+        processing_sound=str(resolve_repo_path(core_config.processing_sound)),
+        mute_sound=str(resolve_repo_path(core_config.mute_sound)),
+        unmute_sound=str(resolve_repo_path(core_config.unmute_sound)),
         system_volume_device=system_volume_device,
-        system_volume_control=args.system_volume_control,
+        system_volume_control=core_config.system_volume_control,
         preferences=preferences,
         preferences_path=preferences_path,
-        refractory_seconds=args.refractory_seconds,
-        download_dir=args.download_dir,
+        refractory_seconds=core_config.refractory_seconds,
+        download_dir=download_dir,
         ipc_bridge=LocalIpcBridge(),
     )
     pref_wake_word_detection = bool(int(getattr(preferences, "wake_word_detection", 1)))
@@ -355,38 +177,46 @@ async def main() -> None:
     pref_engaged_vad_window = max(0.5, min(8.0, float(getattr(preferences, "engaged_vad_window_s", 2.5))))
 
     state.wake_word_detection_enabled = (
-        pref_wake_word_detection if (args.wake_word_detection is None) else bool(args.wake_word_detection)
+        pref_wake_word_detection
+        if (core_config.wake_word_detection is None)
+        else bool(core_config.wake_word_detection)
     )
     state.distance_activation_enabled = (
-        pref_distance_activation if (args.distance_activation is None) else bool(args.distance_activation)
+        pref_distance_activation
+        if (core_config.distance_activation is None)
+        else bool(core_config.distance_activation)
     )
     state.distance_activation_sound_enabled = pref_distance_activation_sound
     state.distance_activation_threshold_mm = (
         pref_distance_threshold
-        if (args.distance_activation_threshold_mm is None)
-        else max(10.0, min(2000.0, float(args.distance_activation_threshold_mm)))
+        if (core_config.distance_activation_threshold_mm is None)
+        else max(10.0, min(2000.0, float(core_config.distance_activation_threshold_mm)))
     )
     state.distance_sensor_model = (
-        pref_distance_model if (args.distance_sensor_model is None) else str(args.distance_sensor_model)
+        pref_distance_model if (core_config.distance_sensor_model is None) else str(core_config.distance_sensor_model)
     )
-    state.vision_enabled = pref_vision_enabled if (args.vision_enabled is None) else bool(args.vision_enabled)
+    state.vision_enabled = (
+        pref_vision_enabled if (core_config.vision_enabled is None) else bool(core_config.vision_enabled)
+    )
     state.attention_required = (
-        pref_attention_required if (args.attention_required is None) else bool(args.attention_required)
+        pref_attention_required
+        if (core_config.attention_required is None)
+        else bool(core_config.attention_required)
     )
     state.vision_cooldown_s = (
         pref_vision_cooldown
-        if (args.vision_cooldown_s is None)
-        else max(0.0, min(15.0, float(args.vision_cooldown_s)))
+        if (core_config.vision_cooldown_s is None)
+        else max(0.0, min(15.0, float(core_config.vision_cooldown_s)))
     )
     state.vision_min_confidence = (
         pref_vision_min_conf
-        if (args.vision_min_confidence is None)
-        else max(0.0, min(1.0, float(args.vision_min_confidence)))
+        if (core_config.vision_min_confidence is None)
+        else max(0.0, min(1.0, float(core_config.vision_min_confidence)))
     )
     state.engaged_vad_window_s = (
         pref_engaged_vad_window
-        if (args.engaged_vad_window_s is None)
-        else max(0.5, min(8.0, float(args.engaged_vad_window_s)))
+        if (core_config.engaged_vad_window_s is None)
+        else max(0.5, min(8.0, float(core_config.engaged_vad_window_s)))
     )
     state.preferences.wake_word_detection = 1 if state.wake_word_detection_enabled else 0
     state.preferences.distance_activation = 1 if state.distance_activation_enabled else 0
@@ -409,12 +239,12 @@ async def main() -> None:
         "on" if state.attention_required else "off",
     )
 
-    if args.enable_thinking_sound:
-        state.save_preferences() 
+    if core_config.enable_thinking_sound:
+        state.save_preferences()
 
     process_audio_thread = threading.Thread(
         target=process_audio,
-        args=(state, mic, args.audio_input_block_size),
+        args=(state, mic, core_config.audio_input_block_size),
         daemon=True,
     )
     process_audio_thread.start()
@@ -423,13 +253,13 @@ async def main() -> None:
     if state.ipc_bridge is not None:
         await state.ipc_bridge.start()
 
-    if not args.disable_gpio_control:
+    if core_config.enable_gpio_control:
         try:
             state.gpio_controller = LvaGpioController(
                 ipc_bridge=state.ipc_bridge,
                 preferences_path=preferences_path,
-                feedback_sound_path=Path(args.processing_sound),
-                feedback_sound_device=args.gpio_feedback_device,
+                feedback_sound_path=Path(state.processing_sound),
+                feedback_sound_device=core_config.gpio_feedback_device,
             )
             await state.gpio_controller.start()
             _LOGGER.info("Integrated GPIO controller started")
@@ -437,19 +267,19 @@ async def main() -> None:
             _LOGGER.exception("Failed to start integrated GPIO controller")
             state.gpio_controller = None
     else:
-        _LOGGER.info("Integrated GPIO controller disabled by CLI flag")
+        _LOGGER.info("Integrated GPIO controller disabled by config")
 
     server = await loop.create_server(
-        lambda: VoiceSatelliteProtocol(state), host=args.host, port=args.port
+        lambda: VoiceSatelliteProtocol(state), host=core_config.host, port=core_config.port
     )
 
     # Auto discovery (zeroconf, mDNS)
-    discovery = HomeAssistantZeroconf(port=args.port, name=args.name)
+    discovery = HomeAssistantZeroconf(port=core_config.port, name=core_config.name)
     await discovery.register_server()
 
     try:
         async with server:
-            _LOGGER.info("Server started (host=%s, port=%s)", args.host, args.port)
+            _LOGGER.info("Server started (host=%s, port=%s)", core_config.host, core_config.port)
             await server.serve_forever()
     except KeyboardInterrupt:
         pass

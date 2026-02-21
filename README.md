@@ -43,40 +43,46 @@ script/setup
 
 ## Running
 
-Use `script/run` or `python3 -m linux_voice_assistant`
+Configuration is file-based only (no runtime CLI flags).
 
-You must specify `--name <NAME>` with a name that will be available in Home Assistant.
+Default config path:
 
-See `--help` for more options.
+* `/home/user/linux-voice-assistant/config.json`
+* or path from env var `LVA_CONFIG_PATH`
+
+Run services:
+
+* `python3 -m linux_voice_assistant`
+* `python3 -m linux_voice_assistant.visd`
+* `python3 -m linux_voice_assistant.frontpaneld`
+
+Edit `config.json` to change behavior.
 
 ### Microphone
 
-Use `--audio-input-device` to change the microphone device. Use `--list-input-devices` to see the available microphones. 
+Set `core.audio_input_device` in `config.json`.
 
 The microphone device **must** support 16Khz mono audio.
 
 ### Speaker
 
-Use `--audio-output-device` to change the speaker device. Use `--list-output-devices` to see the available speakers.
+Set `core.audio_output_device` in `config.json`.
 
 ### Sounds
 
-Customize wake word and timer sounds (defaults are used if not specified):
-``` sh
-python3 -m linux_voice_assistant ... \
-    --wakeup-sound sounds/wake_word_triggered_old.wav \
-    --timer-finished-sound sounds/timer_finished.flac
-```
+Customize via:
+* `core.wakeup_sound`
+* `core.timer_finished_sound`
+* `core.processing_sound`
+* `core.mute_sound`
+* `core.unmute_sound`
 
 Available sounds:
 * **Wake sounds**: `wake_word_triggered.flac` (default), `wake_word_triggered_old.wav`
 * **Timer sounds**: `timer_finished.flac` (default), `timer_finished_old.wav`
 
-The optional "thinking" sound plays while the assistant is processing. Enable it on startup with:
-``` sh
-python3 -m linux_voice_assistant ... \
-    --enable-thinking-sound
-```
+The optional "thinking" sound plays while the assistant is processing.
+Enable it via `core.enable_thinking_sound: true`.
 
 This enables the thinking sound by default and sets the Home Assistant switch to ON. The switch can be toggled at any time from the device page.
 
@@ -91,17 +97,9 @@ Supported hardware behavior:
 * Volume up/down buttons on `GPIO22`/`GPIO23` (`volume_up`, `volume_down`)
 * Local volume feedback sound via `aplay`
 
-Useful options:
-``` sh
-python3 -m linux_voice_assistant ... \
-    --gpio-feedback-device "sysdefault:CARD=wm8960soundcard"
-```
-
-To disable integrated GPIO handling:
-``` sh
-python3 -m linux_voice_assistant ... \
-    --disable-gpio-control
-```
+Useful config:
+* `core.gpio_feedback_device`
+* `core.enable_gpio_control`
 
 Notes:
 * External IPC sockets (`/tmp/lva-ipc/control.sock`, `/tmp/lva-ipc/gpio-events.sock`) are still available.
@@ -118,47 +116,25 @@ Behavior:
 
 Sensor selection:
 
-``` sh
-# default: l0x
-python3 -m linux_voice_assistant ... --distance-sensor-model l1x
-```
+* `core.distance_sensor_model`: `"l0x"` or `"l1x"`
 
 ### Trigger Modes (Wake Word / Distance / Both)
 
-You can control how listening is triggered:
-
-``` sh
-# Wake word only (default)
-python3 -m linux_voice_assistant ... \
-    --wake-word-detection \
-    --no-distance-activation
-
-# Distance only (direct listening when close)
-python3 -m linux_voice_assistant ... \
-    --no-wake-word-detection \
-    --distance-activation \
-    --distance-activation-threshold-mm 120
-
-# Both wake word and distance trigger
-python3 -m linux_voice_assistant ... \
-    --wake-word-detection \
-    --distance-activation \
-    --distance-activation-threshold-mm 120
-```
+Control in `config.json`:
+* `core.wake_word_detection`
+* `core.distance_activation`
+* `core.distance_activation_threshold_mm`
 
 ### Attention Gating (Vision Overlay on Distance)
 
 When distance activation is enabled, you can require a quick vision check (`FACE_TOWARD`) before starting listening:
 
-``` sh
-python3 -m linux_voice_assistant ... \
-    --distance-activation \
-    --vision-enabled \
-    --attention-required \
-    --vision-cooldown-s 4.0 \
-    --vision-min-confidence 0.60 \
-    --engaged-vad-window-s 2.5
-```
+Use:
+* `core.vision_enabled`
+* `core.attention_required`
+* `core.vision_cooldown_s`
+* `core.vision_min_confidence`
+* `core.engaged_vad_window_s`
 
 Behavior summary:
 
@@ -169,9 +145,9 @@ Behavior summary:
 
 ## Wake Word
 
-Change the default wake word with `--wake-model <id>` where `<id>` is the name of a model in the `wakewords` directory. For example, `--wake-model hey_jarvis` will load `wakewords/hey_jarvis.tflite` by default.
+Change the default wake word with `core.wake_model` where the value is the model ID in `wakewords`.
 
-You can include more wakeword directories by adding `--wake-word-dir <DIR>` where `<DIR>` contains either [microWakeWord][] or [openWakeWord][] config files and `.tflite` models. For example, `--wake-word-dir wakewords/openWakeWord` will include the default wake words for openWakeWord.
+You can include more wakeword directories with `core.wake_word_dirs` where each directory contains either [microWakeWord][] or [openWakeWord][] config files and `.tflite` models.
 
 If you want to add [other wakewords][wakewords-collection], make sure to create a small JSON config file to identify it as an openWakeWord model. For example, download the [GLaDOS][glados] model to `glados.tflite` and create `glados.json` with:
 
@@ -183,7 +159,7 @@ If you want to add [other wakewords][wakewords-collection], make sure to create 
 }
 ```
 
-Add `--wake-word-dir <DIR>` with the directory containing `glados.tflite` and `glados.json` to your command-line.
+Add that directory to `core.wake_word_dirs` in `config.json`.
 
 ### Wake-Word Threshold (Home Assistant)
 
@@ -247,11 +223,7 @@ journalctl -u linux-voice-assistant-frontpaneld.service -f
 
 ### Wake-Word Score Debug Logs
 
-Enable debug logs with:
-
-``` sh
-python3 -m linux_voice_assistant ... --debug
-```
+Set `core.log_level` to `DEBUG`.
 
 When debug is enabled, wake-word scoring logs are emitted at a throttled interval (about every 300ms per model), for example:
 
@@ -285,11 +257,9 @@ pactl list short sinks
 Use the new devices:
 
 ``` sh
-# The device names may be different on your system.
-# Double check with --list-input-devices and --list-output-devices
-python3 -m linux_voice_assistant ... \
-     --audio-input-device 'Echo-Cancel Source' \
-     --audio-output-device 'pipewire/echo-cancel-sink'
+# Set in config.json:
+# core.audio_input_device = "Echo-Cancel Source"
+# core.audio_output_device = "pipewire/echo-cancel-sink"
 ```
 
 <!-- Links -->

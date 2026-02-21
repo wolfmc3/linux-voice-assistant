@@ -3,16 +3,15 @@
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import json
 import logging
 import os
 import socket
 import time
-from pathlib import Path
 from typing import Optional
 
+from ..config import load_config
 from ..local_ipc import CONTROL_SOCKET_PATH, IPC_DIR, VISD_SOCKET_PATH, normalize_message, send_ipc_message
 from .detector import Detector, SimpleFaceGlanceDetector
 
@@ -152,23 +151,16 @@ class VisionDaemon:
 
 
 async def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--camera-index", type=int, default=0)
-    parser.add_argument("--burst-seconds", type=float, default=0.9)
-    parser.add_argument("--frame-count", type=int, default=5)
-    parser.add_argument("--width", type=int, default=320)
-    parser.add_argument("--height", type=int, default=240)
-    parser.add_argument("--debug", action="store_true")
-    args = parser.parse_args()
-
-    logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO)
+    config = load_config().visd
+    log_level_name = str(config.log_level).strip().upper()
+    logging.basicConfig(level=getattr(logging, log_level_name, logging.INFO))
     daemon = VisionDaemon(
         detector=SimpleFaceGlanceDetector(),
-        camera_index=args.camera_index,
-        burst_seconds=args.burst_seconds,
-        frame_count=args.frame_count,
-        width=args.width,
-        height=args.height,
+        camera_index=config.camera_index,
+        burst_seconds=config.burst_seconds,
+        frame_count=config.frame_count,
+        width=config.width,
+        height=config.height,
     )
     await daemon.start()
     try:
