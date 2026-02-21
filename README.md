@@ -3,7 +3,27 @@
 Experimental Linux voice assistant for [Home Assistant][homeassistant] that uses the [ESPHome][esphome] protocol.
 
 Runs on Linux `aarch64` and `x86_64` platforms. Tested with Python 3.13 and Python 3.11.
-Supports announcments, start/continue conversation, and timers.
+Supports announcements, start/continue conversation, timers, distance activation, and attention gating.
+
+## Architecture
+
+The project can run as three cooperating local processes:
+
+* `linux_voice_assistant` (core audio + ESPHome API)
+* `linux_voice_assistant.visd` (camera glance checks, on demand)
+* `linux_voice_assistant.frontpaneld` (touch + encoder -> logical IPC commands)
+
+IPC sockets:
+
+* control: `/tmp/lva-ipc/control.sock`
+* events: `/tmp/lva-ipc/gpio-events.sock`
+* vision daemon: `/tmp/lva-ipc/visd.sock`
+
+IPC envelope:
+
+```json
+{"type":"MESSAGE_TYPE","payload":{},"ts":1700000000.0,"source":"core|visd|frontpaneld"}
+```
 
 ## Installation
 
@@ -62,7 +82,8 @@ This enables the thinking sound by default and sets the Home Assistant switch to
 
 ### GPIO (LED bar + buttons)
 
-The GPIO controller is integrated directly in `linux-voice-assistant`.
+The GPIO controller can run integrated in `linux-voice-assistant` (legacy behavior).
+For production front panel handling (touch/encoder), use `linux_voice_assistant.frontpaneld`.
 
 Supported hardware behavior:
 * WS2812B LED bar state rendering (`OFF`, `READY`, `MUTED`, `LISTENING`, `PLAYBACK`)
@@ -86,14 +107,21 @@ Notes:
 * External IPC sockets (`/tmp/lva-ipc/control.sock`, `/tmp/lva-ipc/gpio-events.sock`) are still available.
 * `gpiozero` and `rpi_ws281x` are optional: if unavailable, GPIO/LED features are disabled with warnings.
 
-### VL53L0X Distance Sensor
+### VL53L0X / VL53L1X Distance Sensor
 
-The satellite exposes a **Distance** sensor to Home Assistant when a VL53L0X is connected on I2C.
+The satellite exposes a **Distance** sensor to Home Assistant when a VL53L0X or VL53L1X is connected on I2C.
 
 Behavior:
 * Read distance internally every `1s`
 * Publish sensor state to Home Assistant every `5s`
 * Unit: `mm`
+
+Sensor selection:
+
+``` sh
+# default: l0x
+python3 -m linux_voice_assistant ... --distance-sensor-model l1x
+```
 
 ### Trigger Modes (Wake Word / Distance / Both)
 
@@ -117,6 +145,27 @@ python3 -m linux_voice_assistant ... \
     --distance-activation \
     --distance-activation-threshold-mm 120
 ```
+
+### Attention Gating (Vision Overlay on Distance)
+
+When distance activation is enabled, you can require a quick vision check (`FACE_TOWARD`) before starting listening:
+
+``` sh
+python3 -m linux_voice_assistant ... \
+    --distance-activation \
+    --vision-enabled \
+    --attention-required \
+    --vision-cooldown-s 4.0 \
+    --vision-min-confidence 0.60 \
+    --engaged-vad-window-s 2.5
+```
+
+Behavior summary:
+
+* Primary gate: distance sensor
+* Secondary gate (optional): `visd` glance burst (`NO_FACE` / `FACE_AWAY` / `FACE_TOWARD`)
+* Listening start uses VAD for distance/manual triggers
+* If VAD does not start in `engaged_vad_window_s`, listening is cancelled
 
 ## Wake Word
 
@@ -156,6 +205,45 @@ How to change it in Home Assistant:
 3. If using `Custom`, set **Wake Word Threshold** to the desired percentage.
 
 Changes are applied live (no full service restart required) and persisted to `preferences.json`.
+
+### Additional Home Assistant Entities (Attention)
+
+New entities for tuning/debug:
+
+* `switch.vision_enabled`
+* `switch.attention_required`
+* `number.vision_cooldown_s`
+* `number.vision_min_confidence`
+* `number.engaged_vad_window_s`
+* `sensor.last_attention_state`
+* `sensor.last_vision_latency_ms`
+* `sensor.last_vision_error`
+
+### Systemd (Core + visd + frontpaneld)
+
+Service files are included in `systemd/`:
+
+* `linux-voice-assistant.service`
+* `linux-voice-assistant-visd.service`
+* `linux-voice-assistant-frontpaneld.service`
+
+Install and start:
+
+``` sh
+sudo cp systemd/linux-voice-assistant*.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now linux-voice-assistant.service
+sudo systemctl enable --now linux-voice-assistant-visd.service
+sudo systemctl enable --now linux-voice-assistant-frontpaneld.service
+```
+
+Logs:
+
+``` sh
+journalctl -u linux-voice-assistant.service -f
+journalctl -u linux-voice-assistant-visd.service -f
+journalctl -u linux-voice-assistant-frontpaneld.service -f
+```
 
 ### Wake-Word Score Debug Logs
 
