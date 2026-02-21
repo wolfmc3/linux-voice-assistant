@@ -1,0 +1,16 @@
+[Unit]
+Description=Linux Voice Assistant Core
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=user
+WorkingDirectory=/home/user/linux-voice-assistant
+ExecStart=/home/user/linux-voice-assistant/.venv/bin/python -m linux_voice_assistant --name LinuxVoiceAssistant
+Restart=always
+RestartSec=2
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

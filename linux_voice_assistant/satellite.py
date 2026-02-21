@@ -41,6 +41,7 @@ from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]
 )
 from aioesphomeapi.core import MESSAGE_TYPE_TO_PROTO
 from aioesphomeapi.model import (
+    VoiceAssistantCommandFlag,
     VoiceAssistantEventType,
     VoiceAssistantFeature,
     VoiceAssistantTimerEventType,
@@ -51,10 +52,15 @@ from pyopen_wakeword import OpenWakeWord
 
 from .api_server import APIServer
 from .entity import (
+    AttentionRequiredSwitchEntity,
     DistanceActivationSwitchEntity,
     DistanceActivationSoundSwitchEntity,
     DistanceActivationThresholdNumberEntity,
     DistanceSensorEntity,
+    EngagedVadWindowNumberEntity,
+    LastAttentionStateSensorEntity,
+    LastVisionErrorSensorEntity,
+    LastVisionLatencySensorEntity,
     LedIntensityNumberEntity,
     MediaPlayerEntity,
     MuteSwitchEntity,
@@ -63,10 +69,16 @@ from .entity import (
     ShutdownButtonEntity,
     SystemVolumeNumberEntity,
     ThinkingSoundEntity,
+    VisionCooldownNumberEntity,
+    VisionEnabledSwitchEntity,
+    VisionMinConfidenceNumberEntity,
     WakeWordDetectionSwitchEntity,
     WakeWordThresholdNumberEntity,
     WakeWordThresholdPresetSelectEntity,
 )
+from .distance_reader import DistanceReader
+from .local_ipc import VISD_SOCKET_PATH, IpcMessage
+from .vl53l1x_reader import Vl53l1xReader
 from .vl53l0x_reader import Vl53l0xReader
 from .models import (
     AvailableWakeWord,
@@ -102,12 +114,17 @@ class VoiceSatelliteProtocol(APIServer):
         self._external_wake_words: Dict[str, VoiceAssistantExternalWakeWord] = {}
         self._disconnect_event = asyncio.Event()
         self._distance_mm: Optional[float] = None
-        self._distance_reader: Optional[Vl53l0xReader] = None
+        self._distance_reader: Optional[DistanceReader] = None
         self._distance_task: Optional[asyncio.Task[None]] = None
         self._distance_last_publish = 0.0
         self._distance_activation_latched = False
         self._distance_last_trigger = 0.0
         self._listening_trigger: Optional[str] = None
+        self._attention_state = "IDLE"
+        self._vision_request_pending_id: Optional[str] = None
+        self._vision_request_sent_at = 0.0
+        self._vision_cooldown_until = 0.0
+        self._engaged_vad_deadline = 0.0
 
         existing_media_players = [
             entity
@@ -294,6 +311,86 @@ class VoiceSatelliteProtocol(APIServer):
         if existing_distance_activation_sound_switches:
             self.state.distance_activation_sound_entity = existing_distance_activation_sound_switches[0]
             for extra in existing_distance_activation_sound_switches[1:]:
+                self.state.entities.remove(extra)
+
+        existing_vision_enabled_switches = [
+            entity
+            for entity in self.state.entities
+            if isinstance(entity, VisionEnabledSwitchEntity)
+        ]
+        if existing_vision_enabled_switches:
+            self.state.vision_enabled_entity = existing_vision_enabled_switches[0]
+            for extra in existing_vision_enabled_switches[1:]:
+                self.state.entities.remove(extra)
+
+        existing_attention_required_switches = [
+            entity
+            for entity in self.state.entities
+            if isinstance(entity, AttentionRequiredSwitchEntity)
+        ]
+        if existing_attention_required_switches:
+            self.state.attention_required_entity = existing_attention_required_switches[0]
+            for extra in existing_attention_required_switches[1:]:
+                self.state.entities.remove(extra)
+
+        existing_vision_cooldown_numbers = [
+            entity
+            for entity in self.state.entities
+            if isinstance(entity, VisionCooldownNumberEntity)
+        ]
+        if existing_vision_cooldown_numbers:
+            self.state.vision_cooldown_entity = existing_vision_cooldown_numbers[0]
+            for extra in existing_vision_cooldown_numbers[1:]:
+                self.state.entities.remove(extra)
+
+        existing_vision_min_conf_numbers = [
+            entity
+            for entity in self.state.entities
+            if isinstance(entity, VisionMinConfidenceNumberEntity)
+        ]
+        if existing_vision_min_conf_numbers:
+            self.state.vision_min_confidence_entity = existing_vision_min_conf_numbers[0]
+            for extra in existing_vision_min_conf_numbers[1:]:
+                self.state.entities.remove(extra)
+
+        existing_engaged_vad_numbers = [
+            entity
+            for entity in self.state.entities
+            if isinstance(entity, EngagedVadWindowNumberEntity)
+        ]
+        if existing_engaged_vad_numbers:
+            self.state.engaged_vad_window_entity = existing_engaged_vad_numbers[0]
+            for extra in existing_engaged_vad_numbers[1:]:
+                self.state.entities.remove(extra)
+
+        existing_attention_state_sensors = [
+            entity
+            for entity in self.state.entities
+            if isinstance(entity, LastAttentionStateSensorEntity)
+        ]
+        if existing_attention_state_sensors:
+            self.state.last_attention_state_entity = existing_attention_state_sensors[0]
+            for extra in existing_attention_state_sensors[1:]:
+                self.state.entities.remove(extra)
+
+        existing_vision_latency_sensors = [
+            entity
+            for entity in self.state.entities
+            if isinstance(entity, LastVisionLatencySensorEntity)
+        ]
+        if existing_vision_latency_sensors:
+            self.state.last_vision_latency_entity = existing_vision_latency_sensors[0]
+            for extra in existing_vision_latency_sensors[1:]:
+                self.state.entities.remove(extra)
+
+        existing_vision_error_sensors = [
+            entity
+            for entity in self.state.entities
+            if isinstance(entity, LastVisionErrorSensorEntity)
+        ]
+        if existing_vision_error_sensors:
+            self.state.last_vision_error_entity = existing_vision_error_sensors[0]
+            for extra in existing_vision_error_sensors[1:]:
                 self.state.entities.remove(extra)
 
         system_volume = self.state.system_volume_entity
@@ -527,6 +624,149 @@ class VoiceSatelliteProtocol(APIServer):
         distance_activation_threshold_number.update_set_threshold(self._set_distance_activation_threshold_mm)
         distance_activation_threshold_number.sync_with_state()
 
+        vision_enabled_switch = self.state.vision_enabled_entity
+        if vision_enabled_switch is None:
+            vision_enabled_switch = VisionEnabledSwitchEntity(
+                server=self,
+                key=len(state.entities),
+                name="Vision Enabled",
+                object_id="vision_enabled",
+                get_enabled=self._get_vision_enabled,
+                set_enabled=self._set_vision_enabled,
+            )
+            self.state.entities.append(vision_enabled_switch)
+            self.state.vision_enabled_entity = vision_enabled_switch
+        elif vision_enabled_switch not in self.state.entities:
+            self.state.entities.append(vision_enabled_switch)
+        vision_enabled_switch.server = self
+        vision_enabled_switch.update_get_enabled(self._get_vision_enabled)
+        vision_enabled_switch.update_set_enabled(self._set_vision_enabled)
+        vision_enabled_switch.sync_with_state()
+
+        attention_required_switch = self.state.attention_required_entity
+        if attention_required_switch is None:
+            attention_required_switch = AttentionRequiredSwitchEntity(
+                server=self,
+                key=len(state.entities),
+                name="Attention Required",
+                object_id="attention_required",
+                get_enabled=self._get_attention_required,
+                set_enabled=self._set_attention_required,
+            )
+            self.state.entities.append(attention_required_switch)
+            self.state.attention_required_entity = attention_required_switch
+        elif attention_required_switch not in self.state.entities:
+            self.state.entities.append(attention_required_switch)
+        attention_required_switch.server = self
+        attention_required_switch.update_get_enabled(self._get_attention_required)
+        attention_required_switch.update_set_enabled(self._set_attention_required)
+        attention_required_switch.sync_with_state()
+
+        vision_cooldown_number = self.state.vision_cooldown_entity
+        if vision_cooldown_number is None:
+            vision_cooldown_number = VisionCooldownNumberEntity(
+                server=self,
+                key=len(state.entities),
+                name="Vision Cooldown",
+                object_id="vision_cooldown_s",
+                get_value=self._get_vision_cooldown_s,
+                set_value=self._set_vision_cooldown_s,
+            )
+            self.state.entities.append(vision_cooldown_number)
+            self.state.vision_cooldown_entity = vision_cooldown_number
+        elif vision_cooldown_number not in self.state.entities:
+            self.state.entities.append(vision_cooldown_number)
+        vision_cooldown_number.server = self
+        vision_cooldown_number.update_get_value(self._get_vision_cooldown_s)
+        vision_cooldown_number.update_set_value(self._set_vision_cooldown_s)
+        vision_cooldown_number.sync_with_state()
+
+        vision_min_confidence_number = self.state.vision_min_confidence_entity
+        if vision_min_confidence_number is None:
+            vision_min_confidence_number = VisionMinConfidenceNumberEntity(
+                server=self,
+                key=len(state.entities),
+                name="Vision Min Confidence",
+                object_id="vision_min_confidence",
+                get_value=self._get_vision_min_confidence,
+                set_value=self._set_vision_min_confidence,
+            )
+            self.state.entities.append(vision_min_confidence_number)
+            self.state.vision_min_confidence_entity = vision_min_confidence_number
+        elif vision_min_confidence_number not in self.state.entities:
+            self.state.entities.append(vision_min_confidence_number)
+        vision_min_confidence_number.server = self
+        vision_min_confidence_number.update_get_value(self._get_vision_min_confidence)
+        vision_min_confidence_number.update_set_value(self._set_vision_min_confidence)
+        vision_min_confidence_number.sync_with_state()
+
+        engaged_vad_window_number = self.state.engaged_vad_window_entity
+        if engaged_vad_window_number is None:
+            engaged_vad_window_number = EngagedVadWindowNumberEntity(
+                server=self,
+                key=len(state.entities),
+                name="Engaged VAD Window",
+                object_id="engaged_vad_window_s",
+                get_value=self._get_engaged_vad_window_s,
+                set_value=self._set_engaged_vad_window_s,
+            )
+            self.state.entities.append(engaged_vad_window_number)
+            self.state.engaged_vad_window_entity = engaged_vad_window_number
+        elif engaged_vad_window_number not in self.state.entities:
+            self.state.entities.append(engaged_vad_window_number)
+        engaged_vad_window_number.server = self
+        engaged_vad_window_number.update_get_value(self._get_engaged_vad_window_s)
+        engaged_vad_window_number.update_set_value(self._set_engaged_vad_window_s)
+        engaged_vad_window_number.sync_with_state()
+
+        last_attention_state_sensor = self.state.last_attention_state_entity
+        if last_attention_state_sensor is None:
+            last_attention_state_sensor = LastAttentionStateSensorEntity(
+                server=self,
+                key=len(state.entities),
+                name="Last Attention State",
+                object_id="last_attention_state",
+                get_state=self._get_attention_state_text,
+            )
+            self.state.entities.append(last_attention_state_sensor)
+            self.state.last_attention_state_entity = last_attention_state_sensor
+        elif last_attention_state_sensor not in self.state.entities:
+            self.state.entities.append(last_attention_state_sensor)
+        last_attention_state_sensor.server = self
+        last_attention_state_sensor.update_get_state(self._get_attention_state_text)
+
+        last_vision_latency_sensor = self.state.last_vision_latency_entity
+        if last_vision_latency_sensor is None:
+            last_vision_latency_sensor = LastVisionLatencySensorEntity(
+                server=self,
+                key=len(state.entities),
+                name="Last Vision Latency",
+                object_id="last_vision_latency_ms",
+                get_latency_ms=self._get_last_vision_latency_ms,
+            )
+            self.state.entities.append(last_vision_latency_sensor)
+            self.state.last_vision_latency_entity = last_vision_latency_sensor
+        elif last_vision_latency_sensor not in self.state.entities:
+            self.state.entities.append(last_vision_latency_sensor)
+        last_vision_latency_sensor.server = self
+        last_vision_latency_sensor.update_get_latency_ms(self._get_last_vision_latency_ms)
+
+        last_vision_error_sensor = self.state.last_vision_error_entity
+        if last_vision_error_sensor is None:
+            last_vision_error_sensor = LastVisionErrorSensorEntity(
+                server=self,
+                key=len(state.entities),
+                name="Last Vision Error",
+                object_id="last_vision_error",
+                get_state=self._get_last_vision_error_text,
+            )
+            self.state.entities.append(last_vision_error_sensor)
+            self.state.last_vision_error_entity = last_vision_error_sensor
+        elif last_vision_error_sensor not in self.state.entities:
+            self.state.entities.append(last_vision_error_sensor)
+        last_vision_error_sensor.server = self
+        last_vision_error_sensor.update_get_state(self._get_last_vision_error_text)
+
         # Add/update thinking sound entity
         thinking_sound_switch = self.state.thinking_sound_entity
         if thinking_sound_switch is None:
@@ -559,6 +799,7 @@ class VoiceSatelliteProtocol(APIServer):
         self._start_distance_task()
 
         if self.state.ipc_bridge is not None:
+            self.state.ipc_bridge.set_message_handler(self._handle_ipc_message)
             self.state.ipc_bridge.set_control_handler(self._handle_local_command)
             self._publish_led_intensity()
             self._publish_led_night_mode()
@@ -623,6 +864,58 @@ class VoiceSatelliteProtocol(APIServer):
         _LOGGER.info("Distance activation threshold set to %.1f mm", target)
         return True
 
+    def _get_vision_enabled(self) -> bool:
+        return bool(self.state.vision_enabled)
+
+    def _set_vision_enabled(self, enabled: bool) -> None:
+        self.state.vision_enabled = bool(enabled)
+        self.state.preferences.vision_enabled = 1 if self.state.vision_enabled else 0
+        self.state.save_preferences()
+
+    def _get_attention_required(self) -> bool:
+        return bool(self.state.attention_required)
+
+    def _set_attention_required(self, enabled: bool) -> None:
+        self.state.attention_required = bool(enabled)
+        self.state.preferences.attention_required = 1 if self.state.attention_required else 0
+        self.state.save_preferences()
+
+    def _get_vision_cooldown_s(self) -> float:
+        return float(self.state.vision_cooldown_s)
+
+    def _set_vision_cooldown_s(self, value: float) -> bool:
+        self.state.vision_cooldown_s = max(0.0, min(15.0, float(value)))
+        self.state.preferences.vision_cooldown_s = self.state.vision_cooldown_s
+        self.state.save_preferences()
+        return True
+
+    def _get_vision_min_confidence(self) -> float:
+        return float(self.state.vision_min_confidence)
+
+    def _set_vision_min_confidence(self, value: float) -> bool:
+        self.state.vision_min_confidence = max(0.0, min(1.0, float(value)))
+        self.state.preferences.vision_min_confidence = self.state.vision_min_confidence
+        self.state.save_preferences()
+        return True
+
+    def _get_engaged_vad_window_s(self) -> float:
+        return float(self.state.engaged_vad_window_s)
+
+    def _set_engaged_vad_window_s(self, value: float) -> bool:
+        self.state.engaged_vad_window_s = max(0.5, min(8.0, float(value)))
+        self.state.preferences.engaged_vad_window_s = self.state.engaged_vad_window_s
+        self.state.save_preferences()
+        return True
+
+    def _get_attention_state_text(self) -> str:
+        return self.state.attention_state
+
+    def _get_last_vision_latency_ms(self) -> float:
+        return float(self.state.last_vision_latency_ms)
+
+    def _get_last_vision_error_text(self) -> str:
+        return self.state.last_vision_error
+
     def _get_distance_mm(self) -> Optional[float]:
         return self._distance_mm
 
@@ -630,6 +923,17 @@ class VoiceSatelliteProtocol(APIServer):
         if self.state.distance_sensor_entity is None:
             return
         self.send_messages([self.state.distance_sensor_entity.get_state_message()])
+
+    def _publish_attention_states(self) -> None:
+        states = []
+        if self.state.last_attention_state_entity is not None:
+            states.append(self.state.last_attention_state_entity.get_state_message())
+        if self.state.last_vision_latency_entity is not None:
+            states.append(self.state.last_vision_latency_entity.get_state_message())
+        if self.state.last_vision_error_entity is not None:
+            states.append(self.state.last_vision_error_entity.get_state_message())
+        if states:
+            self.send_messages(states)
 
     def _start_direct_listening(self, trigger: str) -> bool:
         if self.state.muted:
@@ -639,13 +943,16 @@ class VoiceSatelliteProtocol(APIServer):
         if self._is_streaming_audio:
             return False
 
-        self.send_messages([VoiceAssistantRequest(start=True)])
+        request_flags = 0
+        if trigger in ("distance", "manual"):
+            request_flags |= int(VoiceAssistantCommandFlag.USE_VAD)
+        self.send_messages([VoiceAssistantRequest(start=True, flags=request_flags)])
         self._is_streaming_audio = True
         self._listening_trigger = trigger
         self.duck()
         if trigger == "distance" and self.state.distance_activation_sound_enabled:
             self.state.tts_player.play(self.state.wakeup_sound)
-        self._emit_ipc_event("distance_trigger", source=trigger)
+        self._emit_ipc_event("direct_listening", trigger=trigger)
         _LOGGER.info("Direct listening started (trigger=%s)", trigger)
         return True
 
@@ -658,8 +965,91 @@ class VoiceSatelliteProtocol(APIServer):
         self.send_messages([VoiceAssistantRequest(start=False)])
         self._is_streaming_audio = False
         self._listening_trigger = None
+        self._engaged_vad_deadline = 0.0
         self._emit_ipc_event("distance_trigger_cancelled", reason="out_of_range")
         _LOGGER.info("Direct listening cancelled (trigger=distance, reason=out_of_range)")
+
+    def _begin_engaged_window(self, reason: str) -> None:
+        if self._start_direct_listening("distance"):
+            self._engaged_vad_deadline = time.monotonic() + max(0.5, self.state.engaged_vad_window_s)
+            self.state.attention_state = f"ENGAGED_{reason.upper()}"
+            self._publish_attention_states()
+
+    def _request_vision_glance(self, now: float, reason: str) -> None:
+        if self.state.ipc_bridge is None:
+            self.state.last_vision_error = "ipc_unavailable"
+            self.state.attention_state = "VISION_UNAVAILABLE"
+            self._publish_attention_states()
+            self._begin_engaged_window("distance_only")
+            return
+
+        request_id = f"vg-{int(now * 1000)}"
+        self._vision_request_pending_id = request_id
+        self._vision_request_sent_at = now
+        self.state.vision_request_counter += 1
+        self.state.attention_state = "VISION_GLANCE"
+        self.state.last_vision_error = ""
+        self._publish_attention_states()
+        self.state.ipc_bridge.send_message(
+            "VISION_GLANCE_REQUEST",
+            {"request_id": request_id, "reason": reason},
+            socket_path=VISD_SOCKET_PATH,
+            source="core",
+        )
+        _LOGGER.info("Vision request sent (id=%s, reason=%s, count=%s)", request_id, reason, self.state.vision_request_counter)
+
+    def _handle_vision_result(self, payload: dict[str, object]) -> None:
+        request_id = str(payload.get("request_id", "")).strip()
+        if not request_id or (request_id != self._vision_request_pending_id):
+            return
+
+        self._vision_request_pending_id = None
+        self._vision_cooldown_until = time.monotonic() + self.state.vision_cooldown_s
+        state = str(payload.get("state", "")).strip().upper()
+        confidence = float(payload.get("confidence", 0.0) or 0.0)
+        latency_ms = float(payload.get("latency_ms", 0.0) or 0.0)
+        error = str(payload.get("error", "")).strip()
+        self.state.last_vision_latency_ms = max(0.0, latency_ms)
+        self.state.last_vision_error = error
+
+        if error:
+            self.state.attention_state = "VISION_ERROR"
+            if self.state.attention_required:
+                self.state.vision_timeout_counter += 1
+                self.state.false_triggers_prevented_counter += 1
+            else:
+                self._begin_engaged_window("vision_error_fallback")
+            self._publish_attention_states()
+            _LOGGER.info(
+                "Vision result error (id=%s, error=%s, timeout=%s, prevented=%s)",
+                request_id,
+                error,
+                self.state.vision_timeout_counter,
+                self.state.false_triggers_prevented_counter,
+            )
+            return
+
+        if (state == "FACE_TOWARD") and (confidence >= self.state.vision_min_confidence):
+            self.state.vision_success_counter += 1
+            self.state.attention_state = "FACE_TOWARD"
+            self._publish_attention_states()
+            self._begin_engaged_window("attention")
+            _LOGGER.info("Vision accepted (id=%s, conf=%.2f, success=%s)", request_id, confidence, self.state.vision_success_counter)
+            return
+
+        self.state.attention_state = state or "NO_FACE"
+        if self.state.attention_required:
+            self.state.false_triggers_prevented_counter += 1
+        else:
+            self._begin_engaged_window("distance_only")
+        self._publish_attention_states()
+        _LOGGER.info(
+            "Vision rejected (id=%s, state=%s, conf=%.2f, prevented=%s)",
+            request_id,
+            self.state.attention_state,
+            confidence,
+            self.state.false_triggers_prevented_counter,
+        )
 
     def _handle_distance_activation(self, now: float) -> None:
         if not self.state.distance_activation_enabled:
@@ -681,17 +1071,30 @@ class VoiceSatelliteProtocol(APIServer):
         if (now - self._distance_last_trigger) < self.state.refractory_seconds:
             return
 
-        if self._start_direct_listening("distance"):
-            self._distance_last_trigger = now
-            self._distance_activation_latched = True
+        self._distance_last_trigger = now
+        self._distance_activation_latched = True
+
+        if (not self.state.vision_enabled) or (not self.state.attention_required):
+            self._begin_engaged_window("distance_only")
+            return
+
+        if now < self._vision_cooldown_until:
+            self.state.attention_state = "VISION_COOLDOWN"
+            self._publish_attention_states()
+            return
+
+        self._request_vision_glance(now, "distance_activation")
 
     def _start_distance_task(self) -> None:
         if self._distance_task is not None:
             return
 
-        if self.state.vl53l0x_reader is None:
-            self.state.vl53l0x_reader = Vl53l0xReader()
-        self._distance_reader = self.state.vl53l0x_reader
+        if self.state.distance_reader is None:
+            if self.state.distance_sensor_model == "l1x":
+                self.state.distance_reader = Vl53l1xReader()
+            else:
+                self.state.distance_reader = Vl53l0xReader()
+        self._distance_reader = self.state.distance_reader
         self._distance_task = asyncio.create_task(self._distance_loop())
 
     async def _distance_loop(self) -> None:
@@ -704,6 +1107,35 @@ class VoiceSatelliteProtocol(APIServer):
                     self._distance_mm = None
 
                 self._handle_distance_activation(now)
+
+                if self._vision_request_pending_id and ((now - self._vision_request_sent_at) > 2.0):
+                    self.state.last_vision_error = "timeout"
+                    self.state.attention_state = "VISION_TIMEOUT"
+                    self.state.vision_timeout_counter += 1
+                    if not self.state.attention_required:
+                        self._begin_engaged_window("vision_timeout_fallback")
+                    else:
+                        self.state.false_triggers_prevented_counter += 1
+                    self._vision_request_pending_id = None
+                    self._vision_cooldown_until = now + self.state.vision_cooldown_s
+                    self._publish_attention_states()
+                    _LOGGER.info(
+                        "Vision timeout (count=%s, prevented=%s)",
+                        self.state.vision_timeout_counter,
+                        self.state.false_triggers_prevented_counter,
+                    )
+
+                if (
+                    self._is_streaming_audio
+                    and (self._listening_trigger == "distance")
+                    and (self._engaged_vad_deadline > 0.0)
+                    and (now > self._engaged_vad_deadline)
+                ):
+                    self.state.attention_state = "VAD_TIMEOUT"
+                    self._publish_attention_states()
+                    self._stop_distance_listening()
+                    self._distance_activation_latched = False
+                    self._vision_cooldown_until = now + min(2.0, self.state.vision_cooldown_s)
 
                 if (now - self._distance_last_publish) >= 5.0:
                     self._publish_distance_state()
@@ -971,6 +1403,48 @@ class VoiceSatelliteProtocol(APIServer):
         self.send_messages([entity._get_state_message()])  # noqa: SLF001
         _LOGGER.debug("Local IPC volume set to %s%%", target)
 
+    def _handle_ipc_message(self, message: IpcMessage) -> None:
+        msg_type = str(message.get("type", "")).strip().upper()
+        payload_obj = message.get("payload")
+        payload = payload_obj if isinstance(payload_obj, dict) else {}
+
+        if msg_type == "VISION_GLANCE_RESULT":
+            self._handle_vision_result(payload)
+            return
+
+        if msg_type == "VOLUME_DELTA":
+            steps = int(payload.get("steps", 0) or 0)
+            if steps != 0:
+                self._adjust_volume(steps)
+            return
+
+        if msg_type == "VOLUME_STEP":
+            direction_raw = payload.get("direction", payload.get("steps", 0))
+            direction = int(direction_raw or 0)
+            if direction > 0:
+                self._adjust_volume(5)
+            elif direction < 0:
+                self._adjust_volume(-5)
+            return
+
+        if msg_type == "MANUAL_WAKE":
+            self._start_direct_listening("manual")
+            return
+
+        if msg_type == "CANCEL":
+            if self._is_streaming_audio:
+                self.send_messages([VoiceAssistantRequest(start=False)])
+                self._is_streaming_audio = False
+                self._listening_trigger = None
+            return
+
+        command = str(payload.get("command", "")).strip().lower()
+        if command:
+            self._handle_local_command(command)
+            return
+
+        self._handle_local_command(msg_type.lower())
+
     def _handle_local_command(self, cmd: str) -> None:
         cmd = cmd.strip().lower()
 
@@ -997,6 +1471,17 @@ class VoiceSatelliteProtocol(APIServer):
 
         if cmd == "volume_down":
             self._adjust_volume(-5)
+            return
+
+        if cmd == "manual_wake":
+            self._start_direct_listening("manual")
+            return
+
+        if cmd == "cancel":
+            if self._is_streaming_audio:
+                self.send_messages([VoiceAssistantRequest(start=False)])
+                self._is_streaming_audio = False
+                self._listening_trigger = None
             return
 
         if cmd == "shutdown":
@@ -1040,6 +1525,12 @@ class VoiceSatelliteProtocol(APIServer):
             VoiceAssistantEventType.VOICE_ASSISTANT_STT_VAD_START,
         ):
             self._emit_ipc_event("listening_start")
+            if (event_type == VoiceAssistantEventType.VOICE_ASSISTANT_STT_VAD_START) and (
+                self._listening_trigger == "distance"
+            ):
+                self._engaged_vad_deadline = 0.0
+                self.state.attention_state = "LISTENING"
+                self._publish_attention_states()
         elif event_type == VoiceAssistantEventType.VOICE_ASSISTANT_INTENT_PROGRESS:
             if data.get("tts_start_streaming") == "1":
                 # Start streaming early
@@ -1060,6 +1551,7 @@ class VoiceSatelliteProtocol(APIServer):
             self._emit_ipc_event("run_end")
             self._is_streaming_audio = False
             self._listening_trigger = None
+            self._engaged_vad_deadline = 0.0
             if not self._tts_played:
                 self._tts_finished()
 
@@ -1184,6 +1676,7 @@ class VoiceSatelliteProtocol(APIServer):
             self._publish_led_intensity()
             self._publish_led_night_mode()
             self._publish_wake_word_threshold_state()
+            self._publish_attention_states()
         elif isinstance(msg, VoiceAssistantSetConfiguration):
             # Change active wake words
             active_wake_words: Set[str] = set()
@@ -1317,6 +1810,7 @@ class VoiceSatelliteProtocol(APIServer):
         self._disconnect_event.set()
         self._is_streaming_audio = False
         self._listening_trigger = None
+        self._engaged_vad_deadline = 0.0
         self._tts_url = None
         self._tts_played = False
         self._continue_conversation = False
@@ -1359,8 +1853,7 @@ class VoiceSatelliteProtocol(APIServer):
             for entity in self.state.entities:
                 states.extend(entity.handle_message(SubscribeHomeAssistantStatesRequest()))
             self.send_messages(states)
-            _LOGGER.debug("Sent entity states after connect")        
-        _LOGGER.info("Disconnected from Home Assistant")
+            _LOGGER.debug("Sent entity states after connect")
 
     def _download_external_wake_word(
         self, external_wake_word: VoiceAssistantExternalWakeWord
@@ -1428,15 +1921,3 @@ class VoiceSatelliteProtocol(APIServer):
             trained_languages=external_wake_word.trained_languages,
             wake_word_path=config_path,
         )
-
-    def process_packet(self, msg_type: int, packet_data: bytes) -> None:
-        super().process_packet(msg_type, packet_data)
-
-        if msg_type == PROTO_TO_MESSAGE_TYPE[AuthenticationRequest]:
-            self.state.connected = True
-            # Send states after connect
-            states = []
-            for entity in self.state.entities:
-                states.extend(entity.handle_message(SubscribeHomeAssistantStatesRequest()))
-            self.send_messages(states)
-            _LOGGER.debug("Sent entity states after connect")

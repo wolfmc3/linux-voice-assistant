@@ -95,6 +95,42 @@ async def main() -> None:
         default=None,
         help="Distance threshold in mm for direct listening trigger (used when --distance-activation is enabled)",
     )
+    parser.add_argument(
+        "--distance-sensor-model",
+        choices=("l0x", "l1x"),
+        default=None,
+        help="Distance sensor model to use (l0x or l1x)",
+    )
+    parser.add_argument(
+        "--vision-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable/disable vision-based attention checks",
+    )
+    parser.add_argument(
+        "--attention-required",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Require FACE_TOWARD before distance-triggered listening",
+    )
+    parser.add_argument(
+        "--vision-cooldown-s",
+        type=float,
+        default=None,
+        help="Cooldown between vision glance requests",
+    )
+    parser.add_argument(
+        "--vision-min-confidence",
+        type=float,
+        default=None,
+        help="Minimum confidence for FACE_TOWARD to be accepted",
+    )
+    parser.add_argument(
+        "--engaged-vad-window-s",
+        type=float,
+        default=None,
+        help="VAD start deadline after distance/attention trigger",
+    )
     parser.add_argument("--stop-model", default="stop", help="Id of stop model")
     parser.add_argument(
         "--download-dir",
@@ -309,6 +345,14 @@ async def main() -> None:
         10.0,
         min(2000.0, float(getattr(preferences, "distance_activation_threshold_mm", 120.0))),
     )
+    pref_distance_model = str(getattr(preferences, "distance_sensor_model", "l0x")).strip().lower()
+    if pref_distance_model not in {"l0x", "l1x"}:
+        pref_distance_model = "l0x"
+    pref_vision_enabled = bool(int(getattr(preferences, "vision_enabled", 1)))
+    pref_attention_required = bool(int(getattr(preferences, "attention_required", 1)))
+    pref_vision_cooldown = max(0.0, min(15.0, float(getattr(preferences, "vision_cooldown_s", 4.0))))
+    pref_vision_min_conf = max(0.0, min(1.0, float(getattr(preferences, "vision_min_confidence", 0.6))))
+    pref_engaged_vad_window = max(0.5, min(8.0, float(getattr(preferences, "engaged_vad_window_s", 2.5))))
 
     state.wake_word_detection_enabled = (
         pref_wake_word_detection if (args.wake_word_detection is None) else bool(args.wake_word_detection)
@@ -322,16 +366,47 @@ async def main() -> None:
         if (args.distance_activation_threshold_mm is None)
         else max(10.0, min(2000.0, float(args.distance_activation_threshold_mm)))
     )
+    state.distance_sensor_model = (
+        pref_distance_model if (args.distance_sensor_model is None) else str(args.distance_sensor_model)
+    )
+    state.vision_enabled = pref_vision_enabled if (args.vision_enabled is None) else bool(args.vision_enabled)
+    state.attention_required = (
+        pref_attention_required if (args.attention_required is None) else bool(args.attention_required)
+    )
+    state.vision_cooldown_s = (
+        pref_vision_cooldown
+        if (args.vision_cooldown_s is None)
+        else max(0.0, min(15.0, float(args.vision_cooldown_s)))
+    )
+    state.vision_min_confidence = (
+        pref_vision_min_conf
+        if (args.vision_min_confidence is None)
+        else max(0.0, min(1.0, float(args.vision_min_confidence)))
+    )
+    state.engaged_vad_window_s = (
+        pref_engaged_vad_window
+        if (args.engaged_vad_window_s is None)
+        else max(0.5, min(8.0, float(args.engaged_vad_window_s)))
+    )
     state.preferences.wake_word_detection = 1 if state.wake_word_detection_enabled else 0
     state.preferences.distance_activation = 1 if state.distance_activation_enabled else 0
     state.preferences.distance_activation_sound = 1 if state.distance_activation_sound_enabled else 0
     state.preferences.distance_activation_threshold_mm = state.distance_activation_threshold_mm
+    state.preferences.distance_sensor_model = state.distance_sensor_model
+    state.preferences.vision_enabled = 1 if state.vision_enabled else 0
+    state.preferences.attention_required = 1 if state.attention_required else 0
+    state.preferences.vision_cooldown_s = state.vision_cooldown_s
+    state.preferences.vision_min_confidence = state.vision_min_confidence
+    state.preferences.engaged_vad_window_s = state.engaged_vad_window_s
     _LOGGER.info(
-        "Trigger config: wake_word=%s distance=%s distance_sound=%s threshold_mm=%.1f",
+        "Trigger config: wake_word=%s distance=%s distance_sound=%s threshold_mm=%.1f sensor=%s vision=%s attention=%s",
         "on" if state.wake_word_detection_enabled else "off",
         "on" if state.distance_activation_enabled else "off",
         "on" if state.distance_activation_sound_enabled else "off",
         state.distance_activation_threshold_mm,
+        state.distance_sensor_model,
+        "on" if state.vision_enabled else "off",
+        "on" if state.attention_required else "off",
     )
 
     if args.enable_thinking_sound:
@@ -413,7 +488,14 @@ def process_audio(state: ServerState, mic, block_size: int):
         _LOGGER.debug("Opening audio input device: %s", mic.name)
         with mic.recorder(samplerate=16000, channels=1, blocksize=block_size) as mic_in:
             while True:
-                audio_chunk_array = mic_in.record(block_size).reshape(-1)
+                try:
+                    audio_chunk_array = mic_in.record(block_size).reshape(-1)
+                except Exception as err:  # noqa: BLE001
+                    if "xrun" in str(err).lower():
+                        state.xrun_counter += 1
+                        _LOGGER.warning("Audio XRUN detected (count=%s): %s", state.xrun_counter, err)
+                        continue
+                    raise
                 audio_chunk = (
                     (np.clip(audio_chunk_array, -1.0, 1.0) * 32767.0)
                     .astype("<i2")  # little-endian 16-bit signed
@@ -526,4 +608,8 @@ def process_audio(state: ServerState, mic, block_size: int):
 # -----------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    asyncio.run(main())
+
+
+def cli() -> None:
     asyncio.run(main())

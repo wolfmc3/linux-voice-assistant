@@ -1,0 +1,16 @@
+[Unit]
+Description=Linux Voice Assistant Front Panel Daemon
+After=linux-voice-assistant.service
+Requires=linux-voice-assistant.service
+
+[Service]
+Type=simple
+User=user
+WorkingDirectory=/home/user/linux-voice-assistant
+ExecStart=/home/user/linux-voice-assistant/.venv/bin/python -m linux_voice_assistant.frontpaneld
+Restart=always
+RestartSec=2
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

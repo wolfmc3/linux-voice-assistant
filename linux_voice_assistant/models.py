@@ -14,12 +14,14 @@ if TYPE_CHECKING:
 
     from .gpio_controller import LvaGpioController
     from .local_ipc import LocalIpcBridge
-    from .vl53l0x_reader import Vl53l0xReader
+    from .distance_reader import DistanceReader
     from .entity import (
         DistanceSensorEntity,
         DistanceActivationSwitchEntity,
         DistanceActivationSoundSwitchEntity,
         DistanceActivationThresholdNumberEntity,
+        AttentionRequiredSwitchEntity,
+        EngagedVadWindowNumberEntity,
         ESPHomeEntity,
         LedIntensityNumberEntity,
         MediaPlayerEntity,
@@ -29,6 +31,12 @@ if TYPE_CHECKING:
         ShutdownButtonEntity,
         SystemVolumeNumberEntity,
         ThinkingSoundEntity,
+        VisionCooldownNumberEntity,
+        VisionEnabledSwitchEntity,
+        VisionMinConfidenceNumberEntity,
+        LastAttentionStateSensorEntity,
+        LastVisionLatencySensorEntity,
+        LastVisionErrorSensorEntity,
         WakeWordDetectionSwitchEntity,
         WakeWordThresholdNumberEntity,
         WakeWordThresholdPresetSelectEntity,
@@ -130,6 +138,12 @@ class Preferences:
     distance_activation: int = 0  # 0 = disabled, 1 = enabled
     distance_activation_sound: int = 1  # 0 = disabled, 1 = enabled
     distance_activation_threshold_mm: float = 120.0
+    distance_sensor_model: str = "l0x"
+    vision_enabled: int = 1  # 0 = disabled, 1 = enabled
+    attention_required: int = 1  # 0 = distance-only, 1 = require attention
+    vision_cooldown_s: float = 4.0
+    vision_min_confidence: float = 0.60
+    engaged_vad_window_s: float = 2.5
     wake_word_threshold_preset: str = WAKE_WORD_THRESHOLD_PRESET_MODEL_DEFAULT
     wake_word_threshold_custom: float = WAKE_WORD_THRESHOLD_DEFAULT_CUSTOM
 
@@ -172,6 +186,14 @@ class ServerState:
     distance_activation_entity: "Optional[DistanceActivationSwitchEntity]" = None
     distance_activation_sound_entity: "Optional[DistanceActivationSoundSwitchEntity]" = None
     distance_activation_threshold_entity: "Optional[DistanceActivationThresholdNumberEntity]" = None
+    vision_enabled_entity: "Optional[VisionEnabledSwitchEntity]" = None
+    attention_required_entity: "Optional[AttentionRequiredSwitchEntity]" = None
+    vision_cooldown_entity: "Optional[VisionCooldownNumberEntity]" = None
+    vision_min_confidence_entity: "Optional[VisionMinConfidenceNumberEntity]" = None
+    engaged_vad_window_entity: "Optional[EngagedVadWindowNumberEntity]" = None
+    last_attention_state_entity: "Optional[LastAttentionStateSensorEntity]" = None
+    last_vision_latency_entity: "Optional[LastVisionLatencySensorEntity]" = None
+    last_vision_error_entity: "Optional[LastVisionErrorSensorEntity]" = None
     wake_words_changed: bool = False
     refractory_seconds: float = 2.0
     thinking_sound_enabled: bool = False
@@ -179,11 +201,25 @@ class ServerState:
     connected: bool = False
     ipc_bridge: "Optional[LocalIpcBridge]" = None
     gpio_controller: "Optional[LvaGpioController]" = None
-    vl53l0x_reader: "Optional[Vl53l0xReader]" = None
+    distance_reader: "Optional[DistanceReader]" = None
     wake_word_detection_enabled: bool = True
     distance_activation_enabled: bool = False
     distance_activation_sound_enabled: bool = True
     distance_activation_threshold_mm: float = 120.0
+    distance_sensor_model: str = "l0x"
+    vision_enabled: bool = True
+    attention_required: bool = True
+    vision_cooldown_s: float = 4.0
+    vision_min_confidence: float = 0.60
+    engaged_vad_window_s: float = 2.5
+    attention_state: str = "UNKNOWN"
+    last_vision_latency_ms: float = 0.0
+    last_vision_error: str = ""
+    vision_request_counter: int = 0
+    vision_success_counter: int = 0
+    vision_timeout_counter: int = 0
+    false_triggers_prevented_counter: int = 0
+    xrun_counter: int = 0
     wake_word_threshold: Optional[float] = None
     wake_word_default_thresholds: Dict[str, float] = field(default_factory=dict)
     

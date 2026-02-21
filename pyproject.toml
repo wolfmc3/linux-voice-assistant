@@ -34,7 +34,13 @@ dependencies = [
     "zeroconf<1",
     "adafruit-blinka>=8,<9",
     "adafruit-circuitpython-vl53l0x>=3,<4",
+    "adafruit-circuitpython-vl53l1x>=3,<4",
 ]
+
+[project.scripts]
+linux-voice-assistant = "linux_voice_assistant.__main__:cli"
+lva-visd = "linux_voice_assistant.visd.__main__:cli"
+lva-frontpaneld = "linux_voice_assistant.frontpaneld.__main__:cli"
 
 [project.optional-dependencies]
 dev = [
@@ -54,5 +60,5 @@ zip-safe  = true
 include-package-data = true
 
 [tool.setuptools.packages.find]
-include = ["linux_voice_assistant"]
+include = ["linux_voice_assistant", "linux_voice_assistant.*"]
 exclude = ["tests", "tests.*"]

@@ -23,7 +23,7 @@ except Exception:  # noqa: BLE001
     Color = None  # type: ignore[assignment]
     PixelStrip = None  # type: ignore[assignment]
 
-from .local_ipc import CONTROL_SOCKET_PATH, LocalIpcBridge
+from .local_ipc import CONTROL_SOCKET_PATH, LocalIpcBridge, build_message
 
 BUTTON_MUTE_GPIO = 17
 BUTTON_VOL_UP_GPIO = 22
@@ -439,7 +439,10 @@ class LvaGpioController:
             self._ipc_bridge.handle_command(cmd)
             return
 
-        packet = json.dumps({"cmd": cmd}, separators=(",", ":")).encode("utf-8")
+        packet = json.dumps(
+            build_message(cmd.upper(), {"command": cmd}, source="gpio_controller"),
+            separators=(",", ":"),
+        ).encode("utf-8")
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
         try:
             sock.setblocking(False)
@@ -470,7 +473,14 @@ class LvaGpioController:
 
     def on_ipc_event(self, payload: dict[str, object]) -> None:
         now = time.monotonic()
-        event = str(payload.get("event", "")).strip().lower()
+        event = ""
+        payload_obj = payload.get("payload")
+        if isinstance(payload_obj, dict):
+            event = str(payload_obj.get("event", "")).strip().lower()
+            effective_payload = payload_obj
+        else:
+            event = str(payload.get("event", "")).strip().lower()
+            effective_payload = payload
         if not event:
             return
 
@@ -484,13 +494,13 @@ class LvaGpioController:
             self.state.audio_playback_until = now
             return
         if event == "muted":
-            self.state.muted = bool(payload.get("value", False))
+            self.state.muted = bool(effective_payload.get("value", False))
             return
         if event == "led_intensity":
-            self._update_led_intensity(payload.get("value"), source="ipc")
+            self._update_led_intensity(effective_payload.get("value"), source="ipc")
             return
         if event == "led_night_mode":
-            self._update_led_night_mode(payload.get("value"), source="ipc")
+            self._update_led_night_mode(effective_payload.get("value"), source="ipc")
             return
 
         if event in ("wake_word", "listening_start", "run_start"):

@@ -10,6 +10,7 @@ from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]
     ListEntitiesNumberResponse,
     ListEntitiesRequest,
     ListEntitiesSensorResponse,
+    ListEntitiesTextSensorResponse,
     ListEntitiesSwitchResponse,
     ListEntitiesButtonResponse,
     ListEntitiesSelectResponse,
@@ -21,6 +22,7 @@ from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]
     SelectStateResponse,
     SwitchCommandRequest,
     SwitchStateResponse,
+    TextSensorStateResponse,
     MediaPlayerCommandRequest,
     MediaPlayerStateResponse,
     SubscribeHomeAssistantStatesRequest,
@@ -686,6 +688,248 @@ class DistanceSensorEntity(ESPHomeEntity):
                 accuracy_decimals=0,
                 force_update=False,
                 device_class="distance",
+                state_class=SensorStateClass.MEASUREMENT,
+                entity_category=EntityCategory.DIAGNOSTIC,
+            )
+        elif isinstance(msg, SubscribeHomeAssistantStatesRequest):
+            yield self.get_state_message()
+
+
+class VisionEnabledSwitchEntity(ESPHomeEntity):
+    def __init__(
+        self,
+        server: APIServer,
+        key: int,
+        name: str,
+        object_id: str,
+        get_enabled: Callable[[], bool],
+        set_enabled: Callable[[bool], None],
+    ) -> None:
+        ESPHomeEntity.__init__(self, server)
+        self.key = key
+        self.name = name
+        self.object_id = object_id
+        self._get_enabled = get_enabled
+        self._set_enabled = set_enabled
+        self._switch_state = self._get_enabled()
+
+    def update_get_enabled(self, get_enabled: Callable[[], bool]) -> None:
+        self._get_enabled = get_enabled
+
+    def update_set_enabled(self, set_enabled: Callable[[bool], None]) -> None:
+        self._set_enabled = set_enabled
+
+    def sync_with_state(self) -> None:
+        self._switch_state = self._get_enabled()
+
+    def get_state_message(self) -> SwitchStateResponse:
+        self.sync_with_state()
+        return SwitchStateResponse(key=self.key, state=self._switch_state)
+
+    def handle_message(self, msg: message.Message) -> Iterable[message.Message]:
+        if isinstance(msg, SwitchCommandRequest) and (msg.key == self.key):
+            self._set_enabled(bool(msg.state))
+            yield self.get_state_message()
+        elif isinstance(msg, ListEntitiesRequest):
+            yield ListEntitiesSwitchResponse(
+                object_id=self.object_id,
+                key=self.key,
+                name=self.name,
+                entity_category=EntityCategory.CONFIG,
+                icon="mdi:camera-outline",
+            )
+        elif isinstance(msg, SubscribeHomeAssistantStatesRequest):
+            yield self.get_state_message()
+
+
+class AttentionRequiredSwitchEntity(VisionEnabledSwitchEntity):
+    def handle_message(self, msg: message.Message) -> Iterable[message.Message]:
+        if isinstance(msg, ListEntitiesRequest):
+            yield ListEntitiesSwitchResponse(
+                object_id=self.object_id,
+                key=self.key,
+                name=self.name,
+                entity_category=EntityCategory.CONFIG,
+                icon="mdi:eye-outline",
+            )
+            return
+        yield from super().handle_message(msg)
+
+
+class VisionCooldownNumberEntity(ESPHomeEntity):
+    def __init__(
+        self,
+        server: APIServer,
+        key: int,
+        name: str,
+        object_id: str,
+        get_value: Callable[[], float],
+        set_value: Callable[[float], bool],
+    ) -> None:
+        ESPHomeEntity.__init__(self, server)
+        self.key = key
+        self.name = name
+        self.object_id = object_id
+        self._get_value = get_value
+        self._set_value = set_value
+        self._state = self._get_value()
+
+    def update_get_value(self, get_value: Callable[[], float]) -> None:
+        self._get_value = get_value
+
+    def update_set_value(self, set_value: Callable[[float], bool]) -> None:
+        self._set_value = set_value
+
+    def sync_with_state(self) -> None:
+        self._state = self._get_value()
+
+    def get_state_message(self) -> NumberStateResponse:
+        return NumberStateResponse(key=self.key, state=float(self._state))
+
+    def handle_message(self, msg: message.Message) -> Iterable[message.Message]:
+        if isinstance(msg, NumberCommandRequest) and (msg.key == self.key):
+            self._set_value(msg.state)
+            self.sync_with_state()
+            yield self.get_state_message()
+        elif isinstance(msg, ListEntitiesRequest):
+            yield ListEntitiesNumberResponse(
+                object_id=self.object_id,
+                key=self.key,
+                name=self.name,
+                icon="mdi:timer-cog",
+                min_value=0.0,
+                max_value=15.0,
+                step=0.5,
+                mode=NumberMode.NUMBER_MODE_SLIDER,
+                unit_of_measurement="s",
+                entity_category=EntityCategory.CONFIG,
+            )
+        elif isinstance(msg, SubscribeHomeAssistantStatesRequest):
+            self.sync_with_state()
+            yield self.get_state_message()
+
+
+class VisionMinConfidenceNumberEntity(VisionCooldownNumberEntity):
+    def handle_message(self, msg: message.Message) -> Iterable[message.Message]:
+        if isinstance(msg, ListEntitiesRequest):
+            yield ListEntitiesNumberResponse(
+                object_id=self.object_id,
+                key=self.key,
+                name=self.name,
+                icon="mdi:percent",
+                min_value=0.0,
+                max_value=1.0,
+                step=0.05,
+                mode=NumberMode.NUMBER_MODE_SLIDER,
+                unit_of_measurement="",
+                entity_category=EntityCategory.CONFIG,
+            )
+            return
+        yield from super().handle_message(msg)
+
+
+class EngagedVadWindowNumberEntity(VisionCooldownNumberEntity):
+    def handle_message(self, msg: message.Message) -> Iterable[message.Message]:
+        if isinstance(msg, ListEntitiesRequest):
+            yield ListEntitiesNumberResponse(
+                object_id=self.object_id,
+                key=self.key,
+                name=self.name,
+                icon="mdi:microphone-clock",
+                min_value=0.5,
+                max_value=8.0,
+                step=0.1,
+                mode=NumberMode.NUMBER_MODE_SLIDER,
+                unit_of_measurement="s",
+                entity_category=EntityCategory.CONFIG,
+            )
+            return
+        yield from super().handle_message(msg)
+
+
+class LastAttentionStateSensorEntity(ESPHomeEntity):
+    def __init__(
+        self,
+        server: APIServer,
+        key: int,
+        name: str,
+        object_id: str,
+        get_state: Callable[[], str],
+    ) -> None:
+        ESPHomeEntity.__init__(self, server)
+        self.key = key
+        self.name = name
+        self.object_id = object_id
+        self._get_state = get_state
+
+    def update_get_state(self, get_state: Callable[[], str]) -> None:
+        self._get_state = get_state
+
+    def get_state_message(self) -> TextSensorStateResponse:
+        state = self._get_state().strip()
+        if not state:
+            return TextSensorStateResponse(key=self.key, missing_state=True)
+        return TextSensorStateResponse(key=self.key, state=state, missing_state=False)
+
+    def handle_message(self, msg: message.Message) -> Iterable[message.Message]:
+        if isinstance(msg, ListEntitiesRequest):
+            yield ListEntitiesTextSensorResponse(
+                object_id=self.object_id,
+                key=self.key,
+                name=self.name,
+                icon="mdi:eye-check-outline",
+                entity_category=EntityCategory.DIAGNOSTIC,
+            )
+        elif isinstance(msg, SubscribeHomeAssistantStatesRequest):
+            yield self.get_state_message()
+
+
+class LastVisionErrorSensorEntity(LastAttentionStateSensorEntity):
+    def handle_message(self, msg: message.Message) -> Iterable[message.Message]:
+        if isinstance(msg, ListEntitiesRequest):
+            yield ListEntitiesTextSensorResponse(
+                object_id=self.object_id,
+                key=self.key,
+                name=self.name,
+                icon="mdi:alert-circle-outline",
+                entity_category=EntityCategory.DIAGNOSTIC,
+            )
+            return
+        yield from super().handle_message(msg)
+
+
+class LastVisionLatencySensorEntity(ESPHomeEntity):
+    def __init__(
+        self,
+        server: APIServer,
+        key: int,
+        name: str,
+        object_id: str,
+        get_latency_ms: Callable[[], float],
+    ) -> None:
+        ESPHomeEntity.__init__(self, server)
+        self.key = key
+        self.name = name
+        self.object_id = object_id
+        self._get_latency_ms = get_latency_ms
+
+    def update_get_latency_ms(self, get_latency_ms: Callable[[], float]) -> None:
+        self._get_latency_ms = get_latency_ms
+
+    def get_state_message(self) -> SensorStateResponse:
+        return SensorStateResponse(key=self.key, state=float(max(0.0, self._get_latency_ms())), missing_state=False)
+
+    def handle_message(self, msg: message.Message) -> Iterable[message.Message]:
+        if isinstance(msg, ListEntitiesRequest):
+            yield ListEntitiesSensorResponse(
+                object_id=self.object_id,
+                key=self.key,
+                name=self.name,
+                icon="mdi:timer-outline",
+                unit_of_measurement="ms",
+                accuracy_decimals=0,
+                force_update=False,
+                device_class="duration",
                 state_class=SensorStateClass.MEASUREMENT,
                 entity_category=EntityCategory.DIAGNOSTIC,
             )

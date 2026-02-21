@@ -65,3 +65,20 @@ class Vl53l0xReader:
         if corrected <= 0.0:
             return None
         return corrected
+
+    def read_mm(self) -> Optional[float]:
+        """Compatibility alias used by the distance activation logic."""
+        return self.read_distance_mm()
+
+    def set_timing_budget_ms(self, budget_ms: int) -> bool:
+        # Not supported by this driver wrapper.
+        _LOGGER.debug("VL53L0X timing budget not supported (requested=%sms)", budget_ms)
+        return False
+
+    def set_intermeasurement_ms(self, intermeasurement_ms: int) -> bool:
+        # Not supported by this driver wrapper.
+        _LOGGER.debug(
+            "VL53L0X intermeasurement not supported (requested=%sms)",
+            intermeasurement_ms,
+        )
+        return False
