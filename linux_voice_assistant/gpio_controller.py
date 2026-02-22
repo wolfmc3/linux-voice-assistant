@@ -37,6 +37,9 @@ MIN_COLOR_KEEP_FACTOR = 0.02
 READY_PULSE_HZ = 0.28
 READY_PULSE_MIN = 0.52
 READY_COLOR = (28.0, 125.0, 255.0)
+CONNECTING_PULSE_HZ = 1.2
+CONNECTING_PULSE_MIN = 0.12
+CONNECTING_COLOR = (255.0, 170.0, 20.0)
 LED_INTENSITY_DEFAULT_PERCENT = 100.0
 LED_NIGHT_SCALE_DEFAULT_ENABLED = False
 LED_NIGHT_SCALE_FACTOR = 0.35
@@ -63,6 +66,7 @@ class RuntimeState:
 
 class LedMode:
     OFF = "off"
+    CONNECTING = "connecting"
     READY = "ready"
     MUTED = "muted"
     LISTENING = "listening"
@@ -142,6 +146,8 @@ class Ws2812Bar:
 
         if self._mode == LedMode.READY:
             frame = self._frame_supercar_ready_fixed()
+        elif self._mode == LedMode.CONNECTING:
+            frame = self._frame_connecting(now)
         elif self._mode == LedMode.MUTED:
             frame = self._frame_supercar_muted(now)
         elif self._mode == LedMode.LISTENING:
@@ -164,6 +170,16 @@ class Ws2812Bar:
 
     def _frame_supercar_ready_fixed(self) -> list[tuple[int, int, int]]:
         color = (int(READY_COLOR[0]), int(READY_COLOR[1]), int(READY_COLOR[2]))
+        return [color] * self.count
+
+    def _frame_connecting(self, now: float) -> list[tuple[int, int, int]]:
+        factor = CONNECTING_PULSE_MIN + (
+            (1.0 - CONNECTING_PULSE_MIN) * ((math.sin(now * math.tau * CONNECTING_PULSE_HZ) + 1.0) * 0.5)
+        )
+        color = self._scale_rgb(
+            (int(CONNECTING_COLOR[0]), int(CONNECTING_COLOR[1]), int(CONNECTING_COLOR[2])),
+            factor,
+        )
         return [color] * self.count
 
     def _frame_supercar_muted(self, now: float) -> list[tuple[int, int, int]]:
@@ -469,7 +485,9 @@ class LvaGpioController:
             logging.warning("Volume feedback sound failed (exit=%s)", rc)
 
     async def _is_service_active(self) -> bool:
-        return self._running
+        # The core service owns CONTROL_SOCKET_PATH; if it's gone, treat the
+        # assistant as stopped and force LEDs off.
+        return self._running and CONTROL_SOCKET_PATH.exists()
 
     def on_ipc_event(self, payload: dict[str, object]) -> None:
         now = time.monotonic()
@@ -530,6 +548,8 @@ class LvaGpioController:
 
         if not self.state.service_active:
             mode = LedMode.OFF
+        elif not self.state.ha_connected:
+            mode = LedMode.CONNECTING
         elif self.state.muted:
             mode = LedMode.MUTED
         elif self._is_playback_active(now):

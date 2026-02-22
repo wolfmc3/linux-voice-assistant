@@ -23,6 +23,8 @@ if TYPE_CHECKING:
         AttentionRequiredSwitchEntity,
         EngagedVadWindowNumberEntity,
         ESPHomeEntity,
+        FacePresentBinarySensorEntity,
+        FaceSnapshotCameraEntity,
         LedIntensityNumberEntity,
         MediaPlayerEntity,
         MuteSwitchEntity,
@@ -34,6 +36,7 @@ if TYPE_CHECKING:
         VisionCooldownNumberEntity,
         VisionEnabledSwitchEntity,
         VisionMinConfidenceNumberEntity,
+        VisionSearchingBinarySensorEntity,
         LastAttentionStateSensorEntity,
         LastVisionLatencySensorEntity,
         LastVisionErrorSensorEntity,
@@ -194,6 +197,11 @@ class ServerState:
     last_attention_state_entity: "Optional[LastAttentionStateSensorEntity]" = None
     last_vision_latency_entity: "Optional[LastVisionLatencySensorEntity]" = None
     last_vision_error_entity: "Optional[LastVisionErrorSensorEntity]" = None
+    face_present_entity: "Optional[FacePresentBinarySensorEntity]" = None
+    vision_searching_entity: "Optional[VisionSearchingBinarySensorEntity]" = None
+    face_snapshot_camera_entity: "Optional[FaceSnapshotCameraEntity]" = None
+    visd_face_snapshot_host: str = "127.0.0.1"
+    visd_face_snapshot_port: int = 8766
     wake_words_changed: bool = False
     refractory_seconds: float = 2.0
     thinking_sound_enabled: bool = False

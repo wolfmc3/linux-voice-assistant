@@ -41,6 +41,7 @@ dependencies = [
 linux-voice-assistant = "linux_voice_assistant.__main__:cli"
 lva-visd = "linux_voice_assistant.visd.__main__:cli"
 lva-frontpaneld = "linux_voice_assistant.frontpaneld.__main__:cli"
+lva-visd-test-stream = "linux_voice_assistant.visd.test_stream:cli"
 
 [project.optional-dependencies]
 dev = [

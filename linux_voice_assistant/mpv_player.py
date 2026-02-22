@@ -15,6 +15,9 @@ class MpvMediaPlayer:
         self.player = MPV()
 
         if device:
+            if device.startswith("alsa/"):
+                # Keep output path consistent with local ALSA playback.
+                self.player["ao"] = "alsa"
             self.player["audio-device"] = device
 
         self.is_playing = False

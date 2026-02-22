@@ -88,8 +88,8 @@ This enables the thinking sound by default and sets the Home Assistant switch to
 
 ### GPIO (LED bar + buttons)
 
-The GPIO controller can run integrated in `linux-voice-assistant` (legacy behavior).
-For production front panel handling (touch/encoder), use `linux_voice_assistant.frontpaneld`.
+GPIO/LED control is handled by `linux_voice_assistant.frontpaneld`.
+The core process publishes state/events over IPC; `frontpaneld` owns WS2812 and button I/O.
 
 Supported hardware behavior:
 * WS2812B LED bar state rendering (`OFF`, `READY`, `MUTED`, `LISTENING`, `PLAYBACK`)

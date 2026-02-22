@@ -2,16 +2,24 @@
 Description=Linux Voice Assistant Front Panel Daemon
 After=linux-voice-assistant.service
 Requires=linux-voice-assistant.service
+BindsTo=linux-voice-assistant.service
 
 [Service]
 Type=simple
 User=user
+Group=user
 WorkingDirectory=/home/user/linux-voice-assistant
 ExecStart=/home/user/linux-voice-assistant/.venv/bin/python -m linux_voice_assistant.frontpaneld
+ExecStopPost=/home/user/linux-voice-assistant/.venv/bin/python /home/user/linux-voice-assistant/script/led_off.py
 Restart=always
 RestartSec=2
 Environment=PYTHONUNBUFFERED=1
 Environment=LVA_CONFIG_PATH=/home/user/linux-voice-assistant/config.json
+Environment=HOME=/home/user
+SupplementaryGroups=gpio
+CapabilityBoundingSet=CAP_SYS_RAWIO CAP_DAC_OVERRIDE
+AmbientCapabilities=CAP_SYS_RAWIO CAP_DAC_OVERRIDE
+NoNewPrivileges=false
 
 [Install]
 WantedBy=multi-user.target

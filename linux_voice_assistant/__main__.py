@@ -16,7 +16,6 @@ from pymicro_wakeword import MicroWakeWord, MicroWakeWordFeatures
 from pyopen_wakeword import OpenWakeWord, OpenWakeWordFeatures
 
 from .config import load_config, resolve_repo_path
-from .gpio_controller import LvaGpioController
 from .local_ipc import LocalIpcBridge
 from .models import AvailableWakeWord, Preferences, ServerState, WakeWordType
 from .mpv_player import MpvMediaPlayer
@@ -28,6 +27,7 @@ _LOGGER = logging.getLogger(__name__)
 async def main() -> None:
     app_config = load_config()
     core_config = app_config.core
+    visd_config = app_config.visd
 
     log_level_name = str(core_config.log_level).strip().upper()
     log_level = getattr(logging, log_level_name, logging.INFO)
@@ -159,6 +159,12 @@ async def main() -> None:
         refractory_seconds=core_config.refractory_seconds,
         download_dir=download_dir,
         ipc_bridge=LocalIpcBridge(),
+        visd_face_snapshot_host=(
+            "127.0.0.1"
+            if str(visd_config.face_snapshot_host).strip() in {"", "0.0.0.0", "::"}
+            else str(visd_config.face_snapshot_host).strip()
+        ),
+        visd_face_snapshot_port=int(visd_config.face_snapshot_port),
     )
     pref_wake_word_detection = bool(int(getattr(preferences, "wake_word_detection", 1)))
     pref_distance_activation = bool(int(getattr(preferences, "distance_activation", 0)))
@@ -254,20 +260,9 @@ async def main() -> None:
         await state.ipc_bridge.start()
 
     if core_config.enable_gpio_control:
-        try:
-            state.gpio_controller = LvaGpioController(
-                ipc_bridge=state.ipc_bridge,
-                preferences_path=preferences_path,
-                feedback_sound_path=Path(state.processing_sound),
-                feedback_sound_device=core_config.gpio_feedback_device,
-            )
-            await state.gpio_controller.start()
-            _LOGGER.info("Integrated GPIO controller started")
-        except Exception:  # noqa: BLE001
-            _LOGGER.exception("Failed to start integrated GPIO controller")
-            state.gpio_controller = None
+        _LOGGER.info("GPIO/LED controller delegated to linux-voice-assistant-frontpaneld.service")
     else:
-        _LOGGER.info("Integrated GPIO controller disabled by config")
+        _LOGGER.info("GPIO/LED controller disabled by config")
 
     server = await loop.create_server(
         lambda: VoiceSatelliteProtocol(state), host=core_config.host, port=core_config.port
@@ -286,9 +281,6 @@ async def main() -> None:
     finally:
         state.audio_queue.put_nowait(None)
         process_audio_thread.join()
-        if state.gpio_controller is not None:
-            await state.gpio_controller.shutdown()
-            state.gpio_controller = None
         if state.ipc_bridge is not None:
             state.ipc_bridge.stop()
 

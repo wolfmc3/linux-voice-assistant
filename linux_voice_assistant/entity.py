@@ -5,7 +5,12 @@ from typing import Callable, List, Optional, Union
 
 # pylint: disable=no-name-in-module
 from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]
+    BinarySensorStateResponse,
     ButtonCommandRequest,
+    CameraImageRequest,
+    CameraImageResponse,
+    ListEntitiesBinarySensorResponse,
+    ListEntitiesCameraResponse,
     ListEntitiesMediaPlayerResponse,
     ListEntitiesNumberResponse,
     ListEntitiesRequest,
@@ -64,6 +69,45 @@ class ESPHomeEntity:
     @abstractmethod
     def handle_message(self, msg: message.Message) -> Iterable[message.Message]:
         pass
+
+
+# -----------------------------------------------------------------------------
+
+
+class FaceSnapshotCameraEntity(ESPHomeEntity):
+    def __init__(
+        self,
+        server: APIServer,
+        key: int,
+        name: str,
+        object_id: str,
+        get_image_bytes: Callable[[], bytes],
+    ) -> None:
+        ESPHomeEntity.__init__(self, server)
+        self.key = key
+        self.name = name
+        self.object_id = object_id
+        self._get_image_bytes = get_image_bytes
+
+    def update_get_image_bytes(self, get_image_bytes: Callable[[], bytes]) -> None:
+        self._get_image_bytes = get_image_bytes
+
+    def handle_message(self, msg: message.Message) -> Iterable[message.Message]:
+        if isinstance(msg, ListEntitiesRequest):
+            yield ListEntitiesCameraResponse(
+                object_id=self.object_id,
+                key=self.key,
+                name=self.name,
+            )
+            return
+
+        if isinstance(msg, CameraImageRequest):
+            image_data = b""
+            try:
+                image_data = self._get_image_bytes()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning("Failed to fetch face snapshot image: %s", err)
+            yield CameraImageResponse(key=self.key, data=image_data, done=True)
 
 
 # -----------------------------------------------------------------------------
@@ -935,6 +979,55 @@ class LastVisionLatencySensorEntity(ESPHomeEntity):
             )
         elif isinstance(msg, SubscribeHomeAssistantStatesRequest):
             yield self.get_state_message()
+
+
+class DiagnosticBinarySensorEntity(ESPHomeEntity):
+    def __init__(
+        self,
+        server: APIServer,
+        key: int,
+        name: str,
+        object_id: str,
+        icon: str,
+        get_state: Callable[[], bool],
+    ) -> None:
+        ESPHomeEntity.__init__(self, server)
+        self.key = key
+        self.name = name
+        self.object_id = object_id
+        self._icon = icon
+        self._get_state = get_state
+
+    def update_get_state(self, get_state: Callable[[], bool]) -> None:
+        self._get_state = get_state
+
+    def get_state_message(self) -> BinarySensorStateResponse:
+        return BinarySensorStateResponse(
+            key=self.key,
+            state=bool(self._get_state()),
+            missing_state=False,
+        )
+
+    def handle_message(self, msg: message.Message) -> Iterable[message.Message]:
+        if isinstance(msg, ListEntitiesRequest):
+            yield ListEntitiesBinarySensorResponse(
+                object_id=self.object_id,
+                key=self.key,
+                name=self.name,
+                icon=self._icon,
+                is_status_binary_sensor=False,
+                entity_category=EntityCategory.DIAGNOSTIC,
+            )
+        elif isinstance(msg, SubscribeHomeAssistantStatesRequest):
+            yield self.get_state_message()
+
+
+class FacePresentBinarySensorEntity(DiagnosticBinarySensorEntity):
+    pass
+
+
+class VisionSearchingBinarySensorEntity(DiagnosticBinarySensorEntity):
+    pass
 
 
 class WakeWordThresholdPresetSelectEntity(ESPHomeEntity):

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Optional
 
 import numpy as np
 
@@ -12,6 +12,8 @@ import numpy as np
 class DetectionResult:
     state: str
     confidence: float
+    face_frame_index: Optional[int] = None
+    face_box: Optional[tuple[int, int, int, int]] = None
 
 
 class Detector:
@@ -43,9 +45,16 @@ class SimpleFaceGlanceDetector(Detector):
         best_conf = 0.0
         toward_conf = 0.0
         seen_face = False
-        for frame in frames:
+        best_face_frame_index: Optional[int] = None
+        best_face_box: Optional[tuple[int, int, int, int]] = None
+        for frame_index, frame in enumerate(frames):
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            faces = self._cascade.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=3, minSize=(28, 28))
+            faces = self._cascade.detectMultiScale(
+                gray,
+                scaleFactor=1.15,
+                minNeighbors=3,
+                minSize=(28, 28),
+            )
             if len(faces) == 0:
                 continue
             seen_face = True
@@ -59,12 +68,24 @@ class SimpleFaceGlanceDetector(Detector):
                 center_dy = abs((cy / max(1.0, float(h))) - 0.5)
                 centered = max(0.0, 1.0 - ((center_dx * 1.8) + (center_dy * 1.2)))
                 conf = max(0.0, min(1.0, (face_area * 6.5) + (centered * 0.7)))
+                if conf >= best_conf:
+                    best_face_frame_index = frame_index
+                    best_face_box = (int(x), int(y), int(fw), int(fh))
                 best_conf = max(best_conf, conf)
                 toward_conf = max(toward_conf, centered)
 
         if not seen_face:
             return DetectionResult(state="NO_FACE", confidence=0.0)
         if toward_conf >= 0.45:
-            return DetectionResult(state="FACE_TOWARD", confidence=max(best_conf, toward_conf))
-        return DetectionResult(state="FACE_AWAY", confidence=max(0.2, min(0.95, best_conf)))
-
+            return DetectionResult(
+                state="FACE_TOWARD",
+                confidence=max(best_conf, toward_conf),
+                face_frame_index=best_face_frame_index,
+                face_box=best_face_box,
+            )
+        return DetectionResult(
+            state="FACE_AWAY",
+            confidence=max(0.2, min(0.95, best_conf)),
+            face_frame_index=best_face_frame_index,
+            face_box=best_face_box,
+        )

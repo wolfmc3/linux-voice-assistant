@@ -4,12 +4,23 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
+import socket
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
-from ..config import load_config
-from ..local_ipc import CONTROL_SOCKET_PATH, send_ipc_message
+from ..config import load_config, resolve_repo_path
+from ..gpio_controller import LvaGpioController
+from ..local_ipc import (
+    CONTROL_SOCKET_PATH,
+    GPIO_EVENT_SOCKET_PATH,
+    IPC_DIR,
+    normalize_message,
+    send_ipc_message,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -21,6 +32,23 @@ class PinState:
     fired: bool = False
 
 
+class _IpcEventProtocol(asyncio.DatagramProtocol):
+    def __init__(self, daemon: "FrontPanelDaemon") -> None:
+        self._daemon = daemon
+
+    def datagram_received(self, data: bytes, _addr) -> None:  # type: ignore[override]
+        try:
+            packet = json.loads(data.decode("utf-8"))
+            if not isinstance(packet, dict):
+                return
+            message = normalize_message(packet, default_source="core")
+            if message is None:
+                return
+            self._daemon.handle_event_message(message)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("frontpaneld event decode failed: %s", err)
+
+
 class FrontPanelDaemon:
     def __init__(
         self,
@@ -30,8 +58,14 @@ class FrontPanelDaemon:
         vol_down_pin: int,
         enc_a_pin: int,
         enc_b_pin: int,
+        enable_gpio_control: bool,
+        preferences_path: Path,
+        feedback_sound_path: Path,
+        feedback_sound_device: str,
     ) -> None:
         self._running = False
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._event_transport: asyncio.transports.DatagramTransport | None = None
         self._pins = {
             mute_pin: PinState(),
             vol_up_pin: PinState(),
@@ -46,6 +80,11 @@ class FrontPanelDaemon:
         self._encoder_last_state = 0
         self._encoder_acc = 0
         self._encoder_last_emit = 0.0
+        self._gpio_controller: LvaGpioController | None = None
+        self._enable_gpio_control = enable_gpio_control
+        self._preferences_path = preferences_path
+        self._feedback_sound_path = feedback_sound_path
+        self._feedback_sound_device = feedback_sound_device
 
     def _setup_gpio(self) -> None:
         import RPi.GPIO as gpio  # type: ignore
@@ -133,8 +172,58 @@ class FrontPanelDaemon:
         self._encoder_last_emit = now
         self._send("VOLUME_DELTA", {"steps": emit_dir * 2})
 
+    async def _start_event_listener(self) -> None:
+        assert self._loop is not None
+        IPC_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(IPC_DIR, 0o777)
+        except Exception:  # noqa: BLE001
+            pass
+
+        if GPIO_EVENT_SOCKET_PATH.exists():
+            GPIO_EVENT_SOCKET_PATH.unlink()
+
+        transport, _ = await self._loop.create_datagram_endpoint(
+            lambda: _IpcEventProtocol(self),
+            local_addr=str(GPIO_EVENT_SOCKET_PATH),
+            family=socket.AF_UNIX,
+        )
+        self._event_transport = transport
+        try:
+            os.chmod(GPIO_EVENT_SOCKET_PATH, 0o666)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _stop_event_listener(self) -> None:
+        if self._event_transport is not None:
+            self._event_transport.close()
+            self._event_transport = None
+        try:
+            if GPIO_EVENT_SOCKET_PATH.exists():
+                GPIO_EVENT_SOCKET_PATH.unlink()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def handle_event_message(self, message: dict[str, object]) -> None:
+        if self._gpio_controller is None:
+            return
+        self._gpio_controller.on_ipc_event(message)
+
     async def run(self) -> None:
+        self._loop = asyncio.get_running_loop()
         self._setup_gpio()
+        await self._start_event_listener()
+        if self._enable_gpio_control:
+            self._gpio_controller = LvaGpioController(
+                ipc_bridge=None,
+                preferences_path=self._preferences_path,
+                feedback_sound_path=self._feedback_sound_path,
+                feedback_sound_device=self._feedback_sound_device,
+            )
+            await self._gpio_controller.start()
+            _LOGGER.info("frontpaneld integrated GPIO/LED controller started")
+        else:
+            _LOGGER.info("GPIO/LED controller disabled by config")
         self._running = True
         _LOGGER.info("frontpaneld started")
         try:
@@ -144,6 +233,10 @@ class FrontPanelDaemon:
                 self._poll_encoder(now)
                 await asyncio.sleep(0.01)
         finally:
+            if self._gpio_controller is not None:
+                await self._gpio_controller.shutdown()
+                self._gpio_controller = None
+            self._stop_event_listener()
             self._cleanup_gpio()
 
     def stop(self) -> None:
@@ -151,7 +244,9 @@ class FrontPanelDaemon:
 
 
 async def main() -> None:
-    config = load_config().frontpaneld
+    app_config = load_config()
+    config = app_config.frontpaneld
+    core_config = app_config.core
     log_level_name = str(config.log_level).strip().upper()
     logging.basicConfig(level=getattr(logging, log_level_name, logging.INFO))
     daemon = FrontPanelDaemon(
@@ -160,6 +255,10 @@ async def main() -> None:
         vol_down_pin=config.vol_down_pin,
         enc_a_pin=config.enc_a_pin,
         enc_b_pin=config.enc_b_pin,
+        enable_gpio_control=bool(core_config.enable_gpio_control),
+        preferences_path=resolve_repo_path(core_config.preferences_file),
+        feedback_sound_path=resolve_repo_path(core_config.processing_sound),
+        feedback_sound_device=core_config.gpio_feedback_device,
     )
     try:
         await daemon.run()

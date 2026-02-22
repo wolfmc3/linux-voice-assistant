@@ -58,6 +58,8 @@ class VisdConfig:
     frame_count: int = 5
     width: int = 320
     height: int = 240
+    face_snapshot_host: str = "0.0.0.0"
+    face_snapshot_port: int = 8766
     log_level: str = "INFO"
 
 

@@ -3,9 +3,9 @@
         "name": "LinuxVoiceAssistant",
         "audio_input_device": null,
         "audio_input_block_size": 1024,
-        "audio_output_device": null,
+        "audio_output_device": "alsa/sysdefault:CARD=wm8960soundcard",
         "system_volume_device": null,
-        "system_volume_control": "Speaker",
+        "system_volume_control": "Master",
         "wake_word_dirs": [
             "wakewords"
         ],
@@ -27,7 +27,7 @@
         "wake_word_detection": null,
         "distance_activation": null,
         "distance_activation_threshold_mm": null,
-        "distance_sensor_model": null,
+        "distance_sensor_model": "l0x",
         "vision_enabled": null,
         "attention_required": null,
         "vision_cooldown_s": null,

@@ -6,8 +6,12 @@ import logging
 from typing import Optional
 
 _LOGGER = logging.getLogger(__name__)
-VL53L0X_CAL_SCALE = 0.966
-VL53L0X_CAL_OFFSET_MM = -21.0
+# For long-range operation we avoid compressing far-end values with calibration
+# and increase sensitivity via slower/high-budget measurements.
+VL53L0X_CAL_SCALE = 1.0
+VL53L0X_CAL_OFFSET_MM = 0.0
+VL53L0X_LONG_RANGE_SIGNAL_RATE_LIMIT_MCPS = 0.05
+VL53L0X_LONG_RANGE_TIMING_BUDGET_MS = 330
 
 
 class Vl53l0xReader:
@@ -34,9 +38,17 @@ class Vl53l0xReader:
 
             i2c = busio.I2C(board.SCL, board.SDA)
             sensor = adafruit_vl53l0x.VL53L0X(i2c)
+            # Long-range profile: favor sensitivity over speed to improve
+            # reliability around ~2m on reflective targets.
+            sensor.signal_rate_limit = VL53L0X_LONG_RANGE_SIGNAL_RATE_LIMIT_MCPS
+            sensor.measurement_timing_budget = int(VL53L0X_LONG_RANGE_TIMING_BUDGET_MS * 1000)
             self._sensor = sensor
             self._available = True
-            _LOGGER.info("VL53L0X reader initialized")
+            _LOGGER.info(
+                "VL53L0X reader initialized (long-range: signal_rate_limit=%.2f MCPS, timing_budget=%sms)",
+                VL53L0X_LONG_RANGE_SIGNAL_RATE_LIMIT_MCPS,
+                VL53L0X_LONG_RANGE_TIMING_BUDGET_MS,
+            )
             return
         except Exception as err:  # noqa: BLE001
             _LOGGER.warning("VL53L0X unavailable: %s", err)
@@ -71,9 +83,15 @@ class Vl53l0xReader:
         return self.read_distance_mm()
 
     def set_timing_budget_ms(self, budget_ms: int) -> bool:
-        # Not supported by this driver wrapper.
-        _LOGGER.debug("VL53L0X timing budget not supported (requested=%sms)", budget_ms)
-        return False
+        if (not self._available) or (self._sensor is None):
+            return False
+        try:
+            # Adafruit driver expects microseconds.
+            self._sensor.measurement_timing_budget = int(max(5, budget_ms) * 1000)
+            return True
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("VL53L0X timing budget unsupported: %s", err)
+            return False
 
     def set_intermeasurement_ms(self, intermeasurement_ms: int) -> bool:
         # Not supported by this driver wrapper.

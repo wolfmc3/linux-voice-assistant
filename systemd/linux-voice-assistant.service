@@ -2,12 +2,15 @@
 Description=Linux Voice Assistant Core
 After=network-online.target sound.target
 Wants=network-online.target
+Wants=linux-voice-assistant-frontpaneld.service
+Wants=linux-voice-assistant-visd.service
 
 [Service]
 Type=simple
 User=user
+Group=user
 WorkingDirectory=/home/user/linux-voice-assistant
-ExecStart=/home/user/linux-voice-assistant/.venv/bin/python -m linux_voice_assistant --name LinuxVoiceAssistant
+ExecStart=/home/user/linux-voice-assistant/script/run_studio_lva.sh
 Restart=always
 RestartSec=2
 Environment=PYTHONUNBUFFERED=1

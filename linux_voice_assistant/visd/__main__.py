@@ -8,7 +8,9 @@ import json
 import logging
 import os
 import socket
+import subprocess
 import time
+import uuid
 from typing import Optional
 
 from ..config import load_config
@@ -16,6 +18,7 @@ from ..local_ipc import CONTROL_SOCKET_PATH, IPC_DIR, VISD_SOCKET_PATH, normaliz
 from .detector import Detector, SimpleFaceGlanceDetector
 
 _LOGGER = logging.getLogger(__name__)
+_FACE_SNAPSHOT_PATH = "/face/latest.jpg"
 
 
 class _VisdProtocol(asyncio.DatagramProtocol):
@@ -45,6 +48,8 @@ class VisionDaemon:
         frame_count: int = 5,
         width: int = 320,
         height: int = 240,
+        face_snapshot_host: str = "0.0.0.0",
+        face_snapshot_port: int = 8766,
     ) -> None:
         self._detector = detector
         self._camera_index = camera_index
@@ -52,8 +57,15 @@ class VisionDaemon:
         self._frame_count = max(4, min(6, frame_count))
         self._width = width
         self._height = height
+        self._face_snapshot_host = str(face_snapshot_host)
+        self._face_snapshot_port = int(face_snapshot_port)
         self._transport: Optional[asyncio.transports.DatagramTransport] = None
         self._task: Optional[asyncio.Task[None]] = None
+        self._http_server: Optional[asyncio.base_events.Server] = None
+        self._last_face_jpeg: Optional[bytes] = None
+        self._last_face_updated_at: float = 0.0
+        self._last_face_uuid: str = ""
+        self._placeholder_jpeg: Optional[bytes] = None
 
     async def start(self) -> None:
         IPC_DIR.mkdir(parents=True, exist_ok=True)
@@ -68,7 +80,23 @@ class VisionDaemon:
         )
         self._transport = transport
         os.chmod(VISD_SOCKET_PATH, 0o666)
+        self._placeholder_jpeg = await asyncio.to_thread(self._build_placeholder_jpeg)
+        # Initialize with a valid image so the endpoint always serves a JPEG.
+        self._last_face_jpeg = self._placeholder_jpeg
+        self._last_face_updated_at = time.time()
+        self._last_face_uuid = uuid.uuid4().hex
+        self._http_server = await asyncio.start_server(
+            self._handle_http_client,
+            host=self._face_snapshot_host,
+            port=self._face_snapshot_port,
+        )
         _LOGGER.info("visd ready (%s)", VISD_SOCKET_PATH)
+        _LOGGER.info(
+            "visd face snapshot endpoint ready (http://%s:%s%s)",
+            self._face_snapshot_host,
+            self._face_snapshot_port,
+            _FACE_SNAPSHOT_PATH,
+        )
 
     def stop(self) -> None:
         if self._task is not None:
@@ -77,6 +105,9 @@ class VisionDaemon:
         if self._transport is not None:
             self._transport.close()
             self._transport = None
+        if self._http_server is not None:
+            self._http_server.close()
+            self._http_server = None
         try:
             if VISD_SOCKET_PATH.exists():
                 VISD_SOCKET_PATH.unlink()
@@ -107,6 +138,7 @@ class VisionDaemon:
             detection = self._detector.analyze(frames)
             result_state = detection.state
             confidence = detection.confidence
+            self._update_last_face_snapshot(frames, detection)
         except Exception as err:  # noqa: BLE001
             error = str(err)
             _LOGGER.warning("vision glance failed: %s", err)
@@ -146,8 +178,191 @@ class VisionDaemon:
             frames.append(frame)
         cap.release()
         if not frames:
+            fallback_frame = self._capture_single_frame_rpicam(cv2)
+            if fallback_frame is not None:
+                frames.append(fallback_frame)
+        if not frames:
             raise RuntimeError("camera_no_frames")
         return frames
+
+    def _update_last_face_snapshot(self, frames, detection) -> None:
+        face_box = getattr(detection, "face_box", None)
+        face_frame_index = getattr(detection, "face_frame_index", None)
+        if face_box is None or face_frame_index is None:
+            return
+        if face_frame_index < 0 or face_frame_index >= len(frames):
+            return
+        try:
+            import cv2  # type: ignore
+        except Exception:
+            return
+
+        frame = frames[face_frame_index]
+        x, y, w, h = face_box
+        frame_h, frame_w = frame.shape[:2]
+        pad_x = max(2, int(round(w * 0.20)))
+        pad_y_top = max(2, int(round(h * 0.35)))
+        pad_y_bottom = max(2, int(round(h * 0.35)))
+        x0 = max(0, x - pad_x)
+        y0 = max(0, y - pad_y_top)
+        x1 = min(frame_w, x + w + pad_x)
+        y1 = min(frame_h, y + h + pad_y_bottom)
+        if x1 <= x0 or y1 <= y0:
+            return
+        crop = frame[y0:y1, x0:x1]
+        ok, encoded = cv2.imencode(".jpg", crop)
+        if not ok:
+            return
+        self._last_face_jpeg = bytes(encoded.tobytes())
+        self._last_face_updated_at = time.time()
+        self._last_face_uuid = uuid.uuid4().hex
+
+    def _build_placeholder_jpeg(self) -> bytes:
+        try:
+            import cv2  # type: ignore
+            import numpy as np
+
+            img = np.zeros((128, 128, 3), dtype=np.uint8)
+            ok, encoded = cv2.imencode(".jpg", img)
+            if ok:
+                return bytes(encoded.tobytes())
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Failed to build placeholder JPEG: %s", err)
+        return b""
+
+    async def _handle_http_client(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        try:
+            request_line = await asyncio.wait_for(reader.readline(), timeout=2.0)
+            if not request_line:
+                writer.close()
+                await writer.wait_closed()
+                return
+            try:
+                method, path, _version = (
+                    request_line.decode("iso-8859-1").strip().split(" ", 2)
+                )
+            except ValueError:
+                await self._http_send(
+                    writer,
+                    400,
+                    b"Bad Request",
+                    content_type="text/plain",
+                )
+                return
+
+            # Drain headers.
+            while True:
+                line = await asyncio.wait_for(reader.readline(), timeout=2.0)
+                if not line or line in (b"\r\n", b"\n"):
+                    break
+
+            if method != "GET":
+                await self._http_send(
+                    writer,
+                    405,
+                    b"Method Not Allowed",
+                    content_type="text/plain",
+                )
+                return
+
+            route = path.split("?", 1)[0]
+            if route != _FACE_SNAPSHOT_PATH:
+                await self._http_send(
+                    writer,
+                    404,
+                    b"Not Found",
+                    content_type="text/plain",
+                )
+                return
+
+            body = self._last_face_jpeg or b""
+            await self._http_send(writer, 200, body, content_type="image/jpeg")
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("HTTP snapshot request failed", exc_info=True)
+            try:
+                await self._http_send(
+                    writer,
+                    500,
+                    b"Internal Server Error",
+                    content_type="text/plain",
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+    async def _http_send(
+        self,
+        writer: asyncio.StreamWriter,
+        status: int,
+        body: bytes,
+        *,
+        content_type: str,
+    ) -> None:
+        reason = {
+            200: "OK",
+            400: "Bad Request",
+            404: "Not Found",
+            405: "Method Not Allowed",
+            500: "Internal Server Error",
+        }.get(status, "OK")
+        headers = [
+            f"HTTP/1.1 {status} {reason}\r\n",
+            f"Content-Type: {content_type}\r\n",
+            f"Content-Length: {len(body)}\r\n",
+            "Cache-Control: no-store, no-cache, must-revalidate, max-age=0\r\n",
+            "Pragma: no-cache\r\n",
+            "Expires: 0\r\n",
+            "Connection: close\r\n",
+            "\r\n",
+        ]
+        writer.write("".join(headers).encode("ascii") + body)
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    def _capture_single_frame_rpicam(self, cv2_module):
+        cmd = [
+            "rpicam-jpeg",
+            "-n",
+            "-t",
+            "1",
+            "--camera",
+            str(self._camera_index),
+            "--width",
+            str(self._width),
+            "--height",
+            str(self._height),
+            "-o",
+            "-",
+        ]
+        try:
+            result = subprocess.run(  # noqa: S603
+                cmd,
+                capture_output=True,
+                timeout=max(0.8, self._burst_seconds),
+                check=False,
+            )
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("rpicam fallback failed: %s", err)
+            return None
+
+        if result.returncode != 0 or not result.stdout:
+            return None
+
+        try:
+            import numpy as np
+
+            frame = cv2_module.imdecode(
+                np.frombuffer(result.stdout, dtype=np.uint8),
+                cv2_module.IMREAD_COLOR,
+            )
+            return frame
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("rpicam decode failed: %s", err)
+            return None
 
 
 async def main() -> None:
@@ -161,6 +376,8 @@ async def main() -> None:
         frame_count=config.frame_count,
         width=config.width,
         height=config.height,
+        face_snapshot_host=config.face_snapshot_host,
+        face_snapshot_port=config.face_snapshot_port,
     )
     await daemon.start()
     try:
